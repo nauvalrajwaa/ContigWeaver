@@ -1,17 +1,17 @@
 """
-ContigNexus — Main Pipeline Runner
-====================================
+ContigWeaver — Main Pipeline Runner
+=====================================
 CLI entry point that orchestrates all six modules across Stage 1 and Stage 2.
 
 Usage (Stage 1 only):
-    python -m contignexus.pipeline \\
+    python -m contigweaver \\
         --gfa assembly_graph.gfa \\
         --contigs contigs.fasta \\
         --viral-contigs viral_contigs.fasta \\
         --output-dir results/
 
 Usage (Stage 1 + Stage 2):
-    python -m contignexus.pipeline \\
+    python -m contigweaver \\
         --gfa assembly_graph.gfa \\
         --contigs contigs.fasta \\
         --viral-contigs viral_contigs.fasta \\
@@ -28,21 +28,21 @@ from typing import Optional
 
 import networkx as nx
 
-from contignexus.modules.gfa_parser import GFAParser
-from contignexus.modules.crispr_miner import CRISPRPhageMiner
-from contignexus.modules.graph_exporter import export_graph
-from contignexus.modules.ecological_miner import EcologicalMiner
+from contigweaver.modules.gfa_parser import GFAParser
+from contigweaver.modules.crispr_miner import CRISPRPhageMiner
+from contigweaver.modules.graph_exporter import export_graph
+from contigweaver.modules.ecological_miner import EcologicalMiner
 
-logger = logging.getLogger("contignexus")
+logger = logging.getLogger("contigweaver")
 
 
 # ===========================================================================
 # Pipeline class
 # ===========================================================================
 
-class ContigNexusPipeline:
+class ContigWeaverPipeline:
     """
-    Full ContigNexus pipeline orchestrator.
+    Full ContigWeaver pipeline orchestrator.
 
     Stage 1
     -------
@@ -59,7 +59,7 @@ class ContigNexusPipeline:
 
     def __init__(
         self,
-        output_dir: str | Path = "contignexus_output",
+        output_dir: str | Path = "contigweaver_output",
         minced_bin: str = "minced",
         blastn_bin: str = "blastn",
         makeblastdb_bin: str = "makeblastdb",
@@ -189,8 +189,8 @@ class ContigNexusPipeline:
         }
 
     def _export(self, viral_set: set[str]) -> None:
-        tsv_path = self.output_dir / "contignexus_edges.tsv"
-        html_path = self.output_dir / "contignexus_network.html"
+        tsv_path = self.output_dir / "contigweaver_edges.tsv"
+        html_path = self.output_dir / "contigweaver_network.html"
         export_graph(
             graph=self.graph,
             tsv_path=tsv_path,
@@ -206,10 +206,10 @@ class ContigNexusPipeline:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="contignexus",
+        prog="contigweaver",
         description=(
-            "ContigNexus — Reconstruct inter-contig interactions from "
-            "low-depth metagenomic data."
+            "ContigWeaver — Reconstruct inter-contig interaction networks from "
+            "low-depth metagenomic data without MAG binning."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -246,7 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Output
     out_grp = parser.add_argument_group("Output")
     out_grp.add_argument(
-        "--output-dir", metavar="DIR", default="contignexus_output",
+        "--output-dir", metavar="DIR", default="contigweaver_output",
         help="Directory for all outputs.",
     )
 
@@ -294,9 +294,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
 
-    logger.info("ContigNexus v1.0.0 — starting pipeline.")
+    logger.info("ContigWeaver v1.0.0 — starting pipeline.")
 
-    pipeline = ContigNexusPipeline(
+    pipeline = ContigWeaverPipeline(
         output_dir=args.output_dir,
         minced_bin=args.minced_bin,
         blastn_bin=args.blastn_bin,

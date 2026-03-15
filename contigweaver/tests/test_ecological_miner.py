@@ -7,7 +7,7 @@ from pathlib import Path
 import networkx as nx
 import pytest
 
-from contignexus.modules.ecological_miner import (
+from contigweaver.modules.ecological_miner import (
     CoAbundanceCorrelator,
     EcologicalMiner,
     EcologicalGraphInjector,

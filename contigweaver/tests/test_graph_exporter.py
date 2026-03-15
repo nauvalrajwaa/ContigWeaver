@@ -7,7 +7,7 @@ from pathlib import Path
 import networkx as nx
 import pytest
 
-from contignexus.modules.graph_exporter import GraphExporter, export_graph
+from contigweaver.modules.graph_exporter import GraphExporter, export_graph
 
 
 @pytest.fixture()

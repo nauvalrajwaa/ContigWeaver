@@ -4,8 +4,8 @@ Module 3: Graph Integration & Export
 Merges all evidence layers (physical + CRISPR + ecological) into a single
 NetworkX MultiGraph and exports:
 
-  1. ``contignexus_edges.tsv`` — Tabular edge list for downstream analysis.
-  2. ``contignexus_network.html`` — Interactive PyVis/vis.js visualization.
+  1. ``contigweaver_edges.tsv`` — Tabular edge list for downstream analysis.
+  2. ``contigweaver_network.html`` — Interactive PyVis/vis.js visualization.
 
 Visual encoding rules
 ---------------------
@@ -323,8 +323,8 @@ class GraphExporter:
 
 def export_graph(
     graph: nx.MultiGraph,
-    tsv_path: str | Path = "contignexus_edges.tsv",
-    html_path: str | Path = "contignexus_network.html",
+    tsv_path: str | Path = "contigweaver_edges.tsv",
+    html_path: str | Path = "contigweaver_network.html",
     viral_contigs: Optional[set[str]] = None,
 ) -> tuple[Path, Path]:
     """

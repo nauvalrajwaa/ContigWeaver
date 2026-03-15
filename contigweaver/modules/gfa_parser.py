@@ -8,6 +8,7 @@ Parses a GFA (Graphical Fragment Assembly) file to extract:
 Injects results into a NetworkX MultiGraph.
 """
 
+import gzip
 import logging
 from pathlib import Path
 from typing import Optional
@@ -67,7 +68,8 @@ class GFAParser:
         segments_found = 0
         links_found = 0
 
-        with gfa_path.open("r") as fh:
+        open_fn = gzip.open if str(gfa_path).endswith(".gz") else open
+        with open_fn(gfa_path, "rt") as fh:
             for lineno, raw_line in enumerate(fh, start=1):
                 line = raw_line.strip()
                 if not line or line.startswith("#"):

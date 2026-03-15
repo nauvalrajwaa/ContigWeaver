@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import networkx as nx
 import pytest
 
-from contignexus.modules.crispr_miner import (
+from contigweaver.modules.crispr_miner import (
     BlastFilter,
     CRISPRPhageMiner,
     SpacerExtractor,
@@ -167,7 +167,7 @@ def test_crispr_miner_injects_edges(
     )
 
     with (
-        patch("contignexus.modules.crispr_miner.subprocess.run") as mock_run,
+        patch("contigweaver.modules.crispr_miner.subprocess.run") as mock_run,
         patch.object(
             SpacerExtractor,
             "extract_to_fasta",

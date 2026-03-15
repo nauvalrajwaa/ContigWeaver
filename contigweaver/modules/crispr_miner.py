@@ -378,7 +378,7 @@ class CRISPRPhageMiner:
         self,
         contigs_fasta: str | Path,
         viral_contigs_fasta: str | Path,
-        work_dir: str | Path = "contignexus_workdir",
+        work_dir: str | Path = "contigweaver_workdir",
     ) -> nx.MultiGraph:
         """
         Execute the complete CRISPR-Phage mining pipeline.

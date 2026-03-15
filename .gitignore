@@ -1,0 +1,115 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# ── Distribution / packaging ──────────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+pip-wheel-metadata/
+share/python-wheels/
+*.whl
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env
+.direnv/
+
+# ── Testing & coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.log
+nosetests.xml
+test-results/
+results/
+
+# ── Type checkers ─────────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyright/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── IDEs & editors ────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ── Bioinformatics / pipeline outputs ─────────────────────────────────────────
+# ContigWeaver run outputs (user-generated; commit only example data)
+contigweaver_output/
+contigweaver_workdir/
+*.html
+!contigweaver/data/example/*.html
+
+# BLAST databases
+*.nhr
+*.nin
+*.njs
+*.nnd
+*.nni
+*.nog
+*.nsq
+*.ntf
+*.nto
+*.nal
+
+# Compressed sequence files (large — track originals separately)
+# *.gz   ← commented out; you may want to track results/*.gz
+# *.bz2
+# *.zip
+
+# Common intermediate bioinformatics files
+*.sam
+*.bam
+*.bai
+*.bed
+*.vcf
+*.bcf
+*.paf
+*.maf
+
+# MinCED / BLAST intermediates
+minced_output.txt
+spacers.fasta
+spacer_vs_viral.tsv
+*_blast_db/
+
+# geNomad / VirSorter2 outputs
+genomad_output/
+vs2_output/
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.tmp
+*.bak
+*.orig
+.cache/

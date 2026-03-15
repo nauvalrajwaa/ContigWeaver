@@ -7,7 +7,7 @@ from pathlib import Path
 import networkx as nx
 import pytest
 
-from contignexus.modules.gfa_parser import GFAParser, parse_gfa
+from contigweaver.modules.gfa_parser import GFAParser, parse_gfa
 
 
 # ---------------------------------------------------------------------------
