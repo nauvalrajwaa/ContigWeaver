@@ -11,7 +11,7 @@
 
 Most metagenomic binning workflows collapse complex microbial communities into MAGs (Metagenome-Assembled Genomes). This works well for high-coverage datasets, but **low-depth marine and environmental metagenomes** often yield fragmented assemblies where bins are incomplete, chimeric, or simply absent.
 
-**ContigWeaver** takes a different approach: instead of binning, it builds a **multi-evidence interaction network** directly from the assembly graph, CRISPR spacer targeting, co-abundance patterns, and metabolic complementarity. Each node is a contig; each edge is a biological relationship with an evidence type and weight.
+**ContigWeaver** takes a different approach: instead of binning, it builds a **multi-evidence interaction network** directly from the assembly graph, CRISPR spacer targeting, co-abundance patterns, and metabolic complementarity. Physical evidence starts from native GFA segment IDs, while contig-level evidence (`NODE_*`) is bridged back into the graph with sequence-derived `segment_membership` anchors so the layers stay connected on real SPAdes assemblies.
 
 The result is a browsable interactive HTML network — a "contig web" that reveals phage–host linkages, co-occurring community members, and metabolic guilds even when coverage is too low to bin.
 
@@ -22,9 +22,10 @@ The result is a browsable interactive HTML network — a "contig web" that revea
 | Feature | Description |
 |---|---|
 | **Binning-free** | Works directly on contigs from any assembler (SPAdes, MEGAHIT) |
-| **Four evidence layers** | Physical overlap · CRISPR targeting · Co-abundance · Metabolic complementarity |
+| **Bridge-aware integration** | Reconciles `NODE_*` contigs back to numeric GFA segments with exact or substring sequence anchors |
+| **Four evidence layers** | Physical overlap · Segment membership · CRISPR targeting · Co-abundance |
 | **Gzip-transparent** | Reads `.gfa.gz` and `.fasta.gz` directly — no manual decompression |
-| **Interactive output** | PyVis/vis.js HTML network, filterable by evidence type |
+| **Scalable HTML output** | Full TSV export plus an automatically focused HTML view for very large graphs |
 | **Modular pipeline** | Stage 1 runs with just GFA + contigs; Stage 2 is optional |
 | **Low dependencies** | Pure Python: networkx, pyvis, pandas, scipy |
 
@@ -37,6 +38,7 @@ The result is a browsable interactive HTML network — a "contig web" that revea
 | Module | Source | Edge type |
 |---|---|---|
 | **GFA Parser** | SPAdes / MEGAHIT assembly graph (`.gfa`) | `physical_overlap` |
+| **Contig Reconciler** | Sequence anchors between FASTA contigs and GFA segments | `segment_membership` |
 | **CRISPR-Phage Miner** | MinCED spacer prediction + BLAST vs. viral contigs | `crispr_targeting` |
 
 ### Stage 2 — Ecological Evidence (optional)
@@ -54,6 +56,12 @@ The result is a browsable interactive HTML network — a "contig web" that revea
 git clone https://github.com/your-org/contigweaver.git
 cd contigweaver
 pip install -e .
+```
+
+Or run it directly without installing:
+
+```bash
+python main.py --help
 ```
 
 **Runtime dependencies** (automatically installed):
@@ -82,27 +90,29 @@ conda install -c bioconda blast
 ### Stage 1 only (GFA + CRISPR)
 
 ```bash
-python -m contigweaver \
-  --gfa   results/Assembly/SPAdes/SPAdes-sponge_brin.assembly.gfa.gz \
-  --contigs results/Assembly/SPAdes/SPAdes-sponge_brin.contigs.fa.gz \
-  --viral-contigs viral_contigs.fasta \
+python main.py \
+  --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
+  --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
+  --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
   --output-dir contigweaver_output/
 ```
 
 ### Stage 1 + Stage 2 (full pipeline)
 
 ```bash
-python -m contigweaver \
-  --gfa   results/Assembly/SPAdes/SPAdes-sponge_brin.assembly.gfa.gz \
-  --contigs results/Assembly/SPAdes/SPAdes-sponge_brin.contigs.fa.gz \
-  --viral-contigs viral_contigs.fasta \
-  --coverage  coverage_table.tsv \
+python main.py \
+  --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
+  --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
+  --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
+  --coverage coverage_table.tsv \
   --annotations functional_annotations.tsv \
   --output-dir contigweaver_output/ \
   --verbose
 ```
 
 Open `contigweaver_output/contigweaver_network.html` in any browser to explore the network.
+
+For large real assemblies, ContigWeaver always writes the **full TSV** and then writes a **focused HTML subgraph** around non-physical evidence so browser rendering stays practical.
 
 ---
 
@@ -123,10 +133,17 @@ Open `contigweaver_output/contigweaver_network.html` in any browser to explore t
 | File | Description |
 |---|---|
 | `contigweaver_edges.tsv` | Full edge list with Source, Target, Evidence_Type, weight, attributes |
-| `contigweaver_network.html` | **Interactive network** — open in browser, filter/zoom/search nodes |
+| `contigweaver_network.html` | **Interactive network** — full graph if small, otherwise a focused sampled subgraph around CRISPR / bridge / ecological evidence |
 | `spacers.fasta` | Extracted CRISPR spacers (Stage 1) |
 | `spacer_vs_viral.tsv` | BLAST hits: spacer → viral contig (identity ≥ 95 %, coverage ≥ 90 %) |
 | `minced_output.txt` | Raw MinCED predictions |
+
+### Large-graph behavior
+
+- `contigweaver_edges.tsv` always contains the complete graph.
+- `contigweaver_network.html` switches to a focused view when the graph exceeds the HTML budget.
+- Current default HTML budget: `1500` nodes and `4000` edges.
+- Focus priority: non-physical evidence first (`segment_membership`, `crispr_targeting`, Stage 2 edges), then local graph neighborhood.
 
 ---
 
