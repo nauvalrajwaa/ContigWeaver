@@ -35,6 +35,8 @@ htmlcov/
 nosetests.xml
 test-results/
 results/
+input/
+lib/
 
 # ── Type checkers ─────────────────────────────────────────────────────────────
 .mypy_cache/
@@ -107,6 +109,7 @@ spacer_vs_viral.tsv
 # geNomad / VirSorter2 outputs
 genomad_output/
 vs2_output/
+tmp_real_eval_*/
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 *.tmp
