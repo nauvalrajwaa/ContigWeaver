@@ -30,6 +30,7 @@ import networkx as nx
 
 from contigweaver.modules.gfa_parser import GFAParser
 from contigweaver.modules.crispr_miner import CRISPRPhageMiner
+from contigweaver.modules.contig_reconciler import ContigGraphReconciler
 from contigweaver.modules.graph_exporter import export_graph
 from contigweaver.modules.ecological_miner import EcologicalMiner
 
@@ -76,6 +77,8 @@ class ContigWeaverPipeline:
         self.p_value_threshold = p_value_threshold
 
         self.graph: nx.MultiGraph = nx.MultiGraph()
+        self._stage1_gfa_path: Path | None = None
+        self._stage1_fasta_paths: list[Path] = []
 
     # ------------------------------------------------------------------
     # Stage 1
@@ -100,6 +103,8 @@ class ContigWeaverPipeline:
             Viral contig subset (.fasta).
         """
         logger.info("=== Stage 1: Physical + CRISPR Evidence ===")
+        self._stage1_gfa_path = Path(gfa_path)
+        self._stage1_fasta_paths = [Path(contigs_fasta), Path(viral_contigs_fasta)]
 
         # Module 1 — GFA Parser
         logger.info("--- Module 1: GFA Parser ---")
@@ -129,6 +134,9 @@ class ContigWeaverPipeline:
             self.graph.number_of_nodes(),
             self.graph.number_of_edges(),
         )
+
+        logger.info("--- Bridging contig IDs to GFA segments ---")
+        self._reconcile_contig_ids()
 
         # Module 3 — Export
         logger.info("--- Module 3: Graph Export ---")
@@ -172,6 +180,8 @@ class ContigWeaverPipeline:
             self.graph.number_of_edges(),
         )
 
+        self._reconcile_contig_ids()
+
         # Re-export with updated graph
         logger.info("--- Re-exporting updated graph ---")
         viral_set = self._collect_viral_nodes()
@@ -187,6 +197,22 @@ class ContigWeaverPipeline:
             n for n, d in self.graph.nodes(data=True)
             if d.get("node_type") == "viral"
         }
+
+    def _reconcile_contig_ids(self) -> None:
+        if self._stage1_gfa_path is None or not self._stage1_fasta_paths:
+            return
+
+        reconciler = ContigGraphReconciler(graph=self.graph)
+        summary = reconciler.reconcile(
+            gfa_path=self._stage1_gfa_path,
+            fasta_paths=self._stage1_fasta_paths,
+        )
+        logger.info(
+            "Contig bridging summary: %d candidate contigs, %d resolved, %d bridge edges.",
+            summary["candidate_contigs"],
+            summary["resolved_contigs"],
+            summary["segment_membership_edges"],
+        )
 
     def _export(self, viral_set: set[str]) -> None:
         tsv_path = self.output_dir / "contigweaver_edges.tsv"

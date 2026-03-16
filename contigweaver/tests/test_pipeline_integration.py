@@ -153,6 +153,41 @@ class TestStage1Integration:
         content = tsv.read_text()
         assert "Physical" in content, f"Expected Physical overlap rows, got:\n{content}"
 
+    def test_stage1_reconciles_contig_ids_into_graph(
+        self,
+        tmp_path,
+        mini_gfa_file,
+        mini_contigs_fasta,
+        mini_viral_fasta,
+    ):
+        pipeline = self._make_pipeline(tmp_path)
+
+        def inject_crispr_edge(*args, **kwargs):
+            pipeline.graph.add_node("NODE_7_length_110_cov_63.7593", node_type="unknown", length=110)
+            pipeline.graph.add_node("NODE_37_length_124_cov_14.9354", node_type="viral", length=124)
+            pipeline.graph.add_edge(
+                "NODE_7_length_110_cov_63.7593",
+                "NODE_37_length_124_cov_14.9354",
+                type="crispr_targeting",
+                identity=99.0,
+                coverage=1.0,
+            )
+            return pipeline.graph
+
+        with patch(
+            "contigweaver.modules.crispr_miner.CRISPRPhageMiner.run",
+            side_effect=inject_crispr_edge,
+        ):
+            pipeline.run_stage1(mini_gfa_file, mini_contigs_fasta, mini_viral_fasta)
+
+        edge_types = {data["type"] for _, _, data in pipeline.graph.edges(data=True)}
+        assert "segment_membership" in edge_types
+        assert pipeline.graph.has_edge("NODE_7_length_110_cov_63.7593", "7")
+        assert pipeline.graph.has_edge("NODE_37_length_124_cov_14.9354", "37")
+
+        tsv = tmp_path / "contigweaver_edges.tsv"
+        assert "Segment-Membership" in tsv.read_text()
+
     def test_stage1_creates_html(
         self,
         tmp_path,
