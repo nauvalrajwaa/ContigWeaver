@@ -105,3 +105,30 @@ def test_export_graph_convenience(sample_graph, tmp_path):
     )
     assert tsv.exists()
     assert html.exists()
+
+
+def test_prepare_html_graph_samples_large_graph_around_focus_nodes():
+    graph = nx.MultiGraph()
+    for idx in range(60):
+        node_id = str(idx)
+        graph.add_node(node_id, node_type="unknown", length=500 + idx)
+        if idx > 0:
+            graph.add_edge(str(idx - 1), node_id, type="physical_overlap", overlap_cigar="55M")
+
+    graph.add_node("NODE_host", node_type="unknown", length=1800)
+    graph.add_node("NODE_virus", node_type="viral", length=2200)
+    graph.add_edge("NODE_host", "NODE_virus", type="crispr_targeting", identity=98.0, coverage=1.0)
+    graph.add_edge("NODE_host", "10", type="segment_membership", anchor_length=300, match_type="substring", orientation="+")
+    graph.add_edge("NODE_virus", "11", type="segment_membership", anchor_length=280, match_type="substring", orientation="+")
+
+    exporter = GraphExporter(graph)
+    html_graph, meta = exporter._prepare_html_graph(max_nodes=12, max_edges=16, focus_hops=1)
+
+    assert meta["sampled"] is True
+    assert html_graph.number_of_nodes() <= 12
+    assert html_graph.number_of_edges() <= 16
+    assert html_graph.has_node("NODE_host")
+    assert html_graph.has_node("NODE_virus")
+    edge_types = {data["type"] for _, _, data in html_graph.edges(data=True)}
+    assert "crispr_targeting" in edge_types
+    assert "segment_membership" in edge_types

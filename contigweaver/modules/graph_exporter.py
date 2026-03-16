@@ -63,10 +63,19 @@ EDGE_STYLES: dict[str, dict] = {
         "arrows": "",
         "title_prefix": "Co-Abundance (metabolic match)",
     },
+    "segment_membership": {
+        "color": "#f39c12",
+        "width": 2,
+        "dashes": True,
+        "arrows": "",
+        "title_prefix": "Segment Membership",
+    },
 }
 
 NODE_SIZE_MIN = 10
 NODE_SIZE_MAX = 60
+HTML_MAX_NODES = 1500
+HTML_MAX_EDGES = 4000
 
 
 # ===========================================================================
@@ -126,6 +135,8 @@ class GraphExporter:
             return "CRISPR"
         if edge_type == "co_abundance_guild":
             return "Co-Abundance"
+        if edge_type == "segment_membership":
+            return "Segment-Membership"
         return edge_type
 
     @staticmethod
@@ -136,6 +147,8 @@ class GraphExporter:
             return f"{data.get('identity', 0.0):.2f}"
         if edge_type == "co_abundance_guild":
             return f"{data.get('weight', 0.0):.4f}"
+        if edge_type == "segment_membership":
+            return str(data.get("anchor_length", "NA"))
         return "NA"
 
     # ------------------------------------------------------------------
@@ -186,19 +199,25 @@ class GraphExporter:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         viral_set = viral_contigs or set()
+        html_graph, html_meta = self._prepare_html_graph()
 
         net = Network(
             height=height,
             width=width,
             directed=True,
             bgcolor="#1a1a2e",
-            font_color="white",
             notebook=False,
         )
         net.force_atlas_2based()
+        if html_meta["sampled"]:
+            net.heading = (
+                "ContigWeaver Focused HTML View "
+                f"({html_meta['nodes']} nodes, {html_meta['edges']} edges from "
+                f"{self.graph.number_of_nodes():,}/{self.graph.number_of_edges():,})"
+            )
 
         # Add nodes
-        for node, attrs in self.graph.nodes(data=True):
+        for node, attrs in html_graph.nodes(data=True):
             node_type = attrs.get("node_type", "unknown")
             is_viral = (node in viral_set) or (node_type == "viral")
             length = attrs.get("length", 1)
@@ -222,7 +241,7 @@ class GraphExporter:
             )
 
         # Add edges
-        for u, v, data in self.graph.edges(data=True):
+        for u, v, data in html_graph.edges(data=True):
             edge_type = data.get("type", "unknown")
             style = self._get_edge_style(edge_type, data)
             title = self._build_edge_tooltip(edge_type, data)
@@ -264,6 +283,104 @@ class GraphExporter:
         net.write_html(str(output_path))
         logger.info("Interactive HTML visualization written to %s.", output_path)
         return output_path
+
+    def _prepare_html_graph(
+        self,
+        max_nodes: int = HTML_MAX_NODES,
+        max_edges: int = HTML_MAX_EDGES,
+        focus_hops: int = 1,
+    ) -> tuple[nx.MultiGraph, dict[str, int | bool]]:
+        if (
+            self.graph.number_of_nodes() <= max_nodes
+            and self.graph.number_of_edges() <= max_edges
+        ):
+            return self.graph, {
+                "sampled": False,
+                "nodes": self.graph.number_of_nodes(),
+                "edges": self.graph.number_of_edges(),
+            }
+
+        focus_nodes = self._focus_nodes()
+        if not focus_nodes:
+            focus_nodes = self._top_degree_nodes(limit=max_nodes)
+
+        selected_nodes: set[str] = set(focus_nodes)
+        frontier = list(focus_nodes)
+        for _ in range(max(focus_hops, 0)):
+            next_frontier: list[str] = []
+            for node in frontier:
+                for raw_neighbor in self.graph.neighbors(node):
+                    neighbor = str(raw_neighbor)
+                    if len(selected_nodes) >= max_nodes:
+                        break
+                    if neighbor in selected_nodes:
+                        continue
+                    selected_nodes.add(neighbor)
+                    next_frontier.append(neighbor)
+                if len(selected_nodes) >= max_nodes:
+                    break
+            frontier = next_frontier
+            if not frontier or len(selected_nodes) >= max_nodes:
+                break
+
+        if len(selected_nodes) < max_nodes:
+            for node in self._top_degree_nodes(limit=max_nodes * 2):
+                if len(selected_nodes) >= max_nodes:
+                    break
+                selected_nodes.add(node)
+
+        subgraph = nx.MultiGraph()
+        for node in selected_nodes:
+            if self.graph.has_node(node):
+                subgraph.add_node(node, **self.graph.nodes[node])
+        for u, v, key, data in self.graph.edges(keys=True, data=True):
+            if u in selected_nodes and v in selected_nodes:
+                subgraph.add_edge(u, v, key=key, **data)
+        if subgraph.number_of_edges() <= max_edges:
+            return subgraph, {
+                "sampled": True,
+                "nodes": subgraph.number_of_nodes(),
+                "edges": subgraph.number_of_edges(),
+            }
+
+        edge_rows: list[tuple[tuple[str, str, int], dict, tuple[int, int, int]]] = []
+        degrees = {str(node): int(degree) for node, degree in self.graph.degree()}
+        for u, v, key, data in subgraph.edges(keys=True, data=True):
+            edge_type = data.get("type", "unknown")
+            priority = 0 if edge_type != "physical_overlap" else 1
+            bridge_priority = 0 if edge_type == "segment_membership" else 1
+            score = -(degrees.get(u, 0) + degrees.get(v, 0))
+            edge_rows.append(((u, v, key), data, (priority, bridge_priority, score)))
+
+        edge_rows.sort(key=lambda item: item[2])
+        limited = nx.MultiGraph()
+        for node, attrs in subgraph.nodes(data=True):
+            limited.add_node(node, **attrs)
+        for (u, v, _), data, _ in edge_rows[:max_edges]:
+            limited.add_edge(u, v, **data)
+
+        return limited, {
+            "sampled": True,
+            "nodes": limited.number_of_nodes(),
+            "edges": limited.number_of_edges(),
+        }
+
+    def _focus_nodes(self) -> list[str]:
+        focus_nodes: set[str] = set()
+        for u, v, data in self.graph.edges(data=True):
+            edge_type = data.get("type")
+            if edge_type and edge_type != "physical_overlap":
+                focus_nodes.add(u)
+                focus_nodes.add(v)
+        return sorted(focus_nodes)
+
+    def _top_degree_nodes(self, limit: int) -> list[str]:
+        ranked = sorted(
+            ((str(node), int(degree)) for node, degree in self.graph.degree()),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return [node for node, _ in ranked[:limit]]
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -314,6 +431,13 @@ class GraphExporter:
                 f"Metabolic match: {data.get('metabolic_match', False)}"
             )
             return tooltip
+        if edge_type == "segment_membership":
+            return (
+                f"<b>Segment Membership</b><br>"
+                f"Anchor length: {data.get('anchor_length', 'NA')} bp<br>"
+                f"Match type: {data.get('match_type', 'NA')}<br>"
+                f"Orientation: {data.get('orientation', '?')}"
+            )
         return f"<b>{edge_type}</b>"
 
 
