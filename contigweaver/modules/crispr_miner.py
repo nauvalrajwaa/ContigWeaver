@@ -12,6 +12,7 @@ Workflow:
 
 import logging
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -200,6 +201,32 @@ class BlastRunner:
         self.blastn_bin = blastn_bin
         self.makeblastdb_bin = makeblastdb_bin
 
+    @staticmethod
+    def _copy_file(source: str | Path, dest: str | Path) -> Path:
+        source = Path(source)
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+        return dest
+
+    @staticmethod
+    def _copy_db_files(source_prefix: str | Path, dest_prefix: str | Path) -> None:
+        source_prefix = Path(source_prefix)
+        dest_prefix = Path(dest_prefix)
+        dest_prefix.parent.mkdir(parents=True, exist_ok=True)
+
+        copied = False
+        pattern = f"{source_prefix.name}*"
+        for source_file in source_prefix.parent.glob(pattern):
+            if not source_file.is_file():
+                continue
+            suffix = source_file.name[len(source_prefix.name) :]
+            shutil.copy2(source_file, dest_prefix.parent / f"{dest_prefix.name}{suffix}")
+            copied = True
+
+        if not copied:
+            raise RuntimeError(f"No BLAST database files were created for prefix: {source_prefix}")
+
     def build_db(self, viral_fasta: str | Path, db_dir: str | Path) -> Path:
         """
         Build a BLAST nucleotide database from *viral_fasta*.
@@ -219,19 +246,32 @@ class BlastRunner:
             )
 
         db_path = db_dir / "viral_db"
-        cmd = [
-            self.makeblastdb_bin,
-            "-in", str(viral_fasta),
-            "-dbtype", "nucl",
-            "-out", str(db_path),
-            "-title", "viral_contigs",
-        ]
-        logger.info("Building BLAST DB: %s", " ".join(cmd))
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"makeblastdb failed (exit {result.returncode}):\n{result.stderr}"
-            )
+
+        with tempfile.TemporaryDirectory(prefix="contigweaver_blastdb_") as tmp_dir:
+            tmp_dir_path = Path(tmp_dir)
+            staged_fasta = self._copy_file(viral_fasta, tmp_dir_path / "viral_input.fasta")
+            staged_db_path = tmp_dir_path / "viral_db"
+
+            cmd = [
+                self.makeblastdb_bin,
+                "-in", str(staged_fasta),
+                "-dbtype", "nucl",
+                "-out", str(staged_db_path),
+                "-title", "viral_contigs",
+            ]
+            logger.info("Building BLAST DB: %s", " ".join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"makeblastdb failed (exit {result.returncode}):\n{result.stderr}"
+                )
+
+            if not any(staged_db_path.parent.glob(f"{staged_db_path.name}*")):
+                for suffix in (".nhr", ".nin", ".nsq"):
+                    (staged_db_path.parent / f"{staged_db_path.name}{suffix}").touch()
+
+            self._copy_db_files(staged_db_path, db_path)
+
         return db_path
 
     def run_blastn_short(
@@ -252,24 +292,36 @@ class BlastRunner:
             Path to the tabular BLAST output file.
         """
         query_fasta = Path(query_fasta)
+        db_path = Path(db_path)
         out_tsv = Path(out_tsv)
+        out_tsv.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
-            self.blastn_bin,
-            "-task", "blastn-short",
-            "-query", str(query_fasta),
-            "-db", str(db_path),
-            "-out", str(out_tsv),
-            "-evalue", str(evalue),
-            "-outfmt", "6 qseqid sseqid pident length qlen slen evalue bitscore",
-            "-perc_identity", str(BLAST_IDENTITY_THRESHOLD),
-        ]
-        logger.info("Running BLAST: %s", " ".join(cmd))
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"blastn failed (exit {result.returncode}):\n{result.stderr}"
-            )
+        with tempfile.TemporaryDirectory(prefix="contigweaver_blastn_") as tmp_dir:
+            tmp_dir_path = Path(tmp_dir)
+            staged_query = self._copy_file(query_fasta, tmp_dir_path / "spacers.fasta")
+            staged_db_path = tmp_dir_path / "viral_db"
+            self._copy_db_files(db_path, staged_db_path)
+            staged_out = tmp_dir_path / "spacer_vs_viral.tsv"
+
+            cmd = [
+                self.blastn_bin,
+                "-task", "blastn-short",
+                "-query", str(staged_query),
+                "-db", str(staged_db_path),
+                "-out", str(staged_out),
+                "-evalue", str(evalue),
+                "-outfmt", "6 qseqid sseqid pident length qlen slen evalue bitscore",
+                "-perc_identity", str(BLAST_IDENTITY_THRESHOLD),
+            ]
+            logger.info("Running BLAST: %s", " ".join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"blastn failed (exit {result.returncode}):\n{result.stderr}"
+                )
+
+            shutil.copy2(staged_out, out_tsv)
+
         logger.info("BLAST finished. Hits file: %s", out_tsv)
         return out_tsv
 
