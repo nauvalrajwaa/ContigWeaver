@@ -110,6 +110,7 @@ spacer_vs_viral.tsv
 genomad_output/
 vs2_output/
 tmp_real_eval_*/
+tmp_real_annotation_eval/
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 *.tmp
