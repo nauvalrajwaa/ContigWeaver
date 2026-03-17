@@ -30,6 +30,7 @@ import networkx as nx
 
 from contigweaver.modules.gfa_parser import GFAParser
 from contigweaver.modules.crispr_miner import CRISPRPhageMiner
+from contigweaver.modules.annotation_converter import prepare_annotations_input
 from contigweaver.modules.contig_reconciler import ContigGraphReconciler
 from contigweaver.modules.graph_exporter import export_graph
 from contigweaver.modules.ecological_miner import EcologicalMiner
@@ -163,6 +164,10 @@ class ContigWeaverPipeline:
             Functional annotations TSV for pathway complementarity.
         """
         logger.info("=== Stage 2: Ecological Evidence ===")
+        prepared_annotations = prepare_annotations_input(
+            annotations_input=annotations_tsv,
+            work_dir=self.output_dir / "workdir",
+        )
 
         eco_miner = EcologicalMiner(
             graph=self.graph,
@@ -171,7 +176,7 @@ class ContigWeaverPipeline:
         )
         eco_miner.run(
             coverage_tsv=coverage_tsv,
-            annotations_tsv=annotations_tsv,
+            annotations_tsv=prepared_annotations,
         )
 
         logger.info(
@@ -264,8 +269,9 @@ def build_parser() -> argparse.ArgumentParser:
     stage2.add_argument(
         "--annotations", metavar="FILE", default=None,
         help=(
-            "Functional annotations TSV (Contig_ID, KO_terms, MetaCyc_terms). "
-            "Required for pathway complementarity check in Stage 2."
+            "Functional annotations TSV or Prokka directory. "
+            "TSV must contain Contig_ID plus KO_terms/MetaCyc_terms or functional_terms. "
+            "Directories are converted to a contig-level TSV automatically for Stage 2."
         ),
     )
 

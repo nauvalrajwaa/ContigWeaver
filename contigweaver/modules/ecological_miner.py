@@ -63,7 +63,7 @@ MACRO_PATHWAY_MAP: dict[str, str] = {
     # MetaCyc pathway IDs (partial list)
     "PWY-5505": "carbon_metabolism", "GLYCOLYSIS": "carbon_metabolism",
     "TCA": "carbon_metabolism", "NITRATE-DEG": "nitrogen_metabolism",
-    "SULFATE-REDUCTION": "sulfur_metabolism",
+    "SULFATE-REDUCTION": "sulfur_metabolism", "PHOTOSYSTEM": "photosynthesis",
 }
 
 
