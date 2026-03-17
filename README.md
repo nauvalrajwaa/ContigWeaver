@@ -26,7 +26,7 @@ The result is a browsable interactive HTML network — a "contig web" that revea
 | **Four evidence layers** | Physical overlap · Segment membership · CRISPR targeting · Co-abundance |
 | **Gzip-transparent** | Reads `.gfa.gz` and `.fasta.gz` directly — no manual decompression |
 | **Scalable HTML output** | Full TSV export plus an automatically focused HTML view for very large graphs |
-| **Modular pipeline** | Stage 1 runs with just GFA + contigs; Stage 2 is optional |
+| **Modular pipeline** | Stage 1 runs with just GFA + contigs; Stage 2 accepts either a ready TSV or a Prokka directory |
 | **Low dependencies** | Pure Python: networkx, pyvis, pandas, scipy |
 
 ---
@@ -46,7 +46,7 @@ The result is a browsable interactive HTML network — a "contig web" that revea
 | Module | Source | Edge type |
 |---|---|---|
 | **Co-Abundance Correlator** | Per-sample coverage table (Spearman ρ ≥ 0.85) | `co_abundance_guild` |
-| **Pathway Complementarity** | Functional annotations (KO / MetaCyc terms) | attribute on co-abundance edges |
+| **Pathway Complementarity** | Functional annotations (TSV or converted Prokka directory) | attribute on co-abundance edges |
 
 ---
 
@@ -104,8 +104,8 @@ python main.py \
   --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
   --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
   --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
-  --coverage coverage_table.tsv \
-  --annotations functional_annotations.tsv \
+  --coverage "tmp_real_annotation_eval/coverage_from_headers.tsv" \
+  --annotations "input/SPAdes_Prokka" \
   --output-dir contigweaver_output/ \
   --verbose
 ```
@@ -124,7 +124,7 @@ For large real assemblies, ContigWeaver always writes the **full TSV** and then 
 | `--contigs` | FASTA (plain or `.gz`) | All assembled contigs |
 | `--viral-contigs` | FASTA | Viral / phage contig subset (see [Identifying viral contigs](#identifying-viral-contigs)) |
 | `--coverage` *(optional)* | TSV: `Contig_ID \| sample_1 \| sample_2 \| …` | Per-sample coverage — minimum 3 samples required |
-| `--annotations` *(optional)* | TSV: `Contig_ID \| KO_terms \| MetaCyc_terms` | Functional annotations for metabolic matching |
+| `--annotations` *(optional)* | TSV or Prokka directory | TSV: `Contig_ID \| KO_terms \| MetaCyc_terms` or `Contig_ID \| functional_terms`; directories of Prokka `.gff`/`.tsv` files are converted automatically |
 
 ---
 
@@ -137,6 +137,7 @@ For large real assemblies, ContigWeaver always writes the **full TSV** and then 
 | `spacers.fasta` | Extracted CRISPR spacers (Stage 1) |
 | `spacer_vs_viral.tsv` | BLAST hits: spacer → viral contig (identity ≥ 95 %, coverage ≥ 90 %) |
 | `minced_output.txt` | Raw MinCED predictions |
+| `workdir/converted_annotations.tsv` | Generated automatically when `--annotations` points to a Prokka directory |
 
 ### Large-graph behavior
 
@@ -144,6 +145,13 @@ For large real assemblies, ContigWeaver always writes the **full TSV** and then 
 - `contigweaver_network.html` switches to a focused view when the graph exceeds the HTML budget.
 - Current default HTML budget: `1500` nodes and `4000` edges.
 - Focus priority: non-physical evidence first (`segment_membership`, `crispr_targeting`, Stage 2 edges), then local graph neighborhood.
+
+### Annotation directory support
+
+- `--annotations` can point directly to a Prokka results directory such as `input/SPAdes_Prokka/`.
+- Contig IDs from per-bin Prokka files are canonicalized back to the Stage 1 assembly FASTA by shared `NODE_<index>`.
+- Prokka `gene`, `product`, `EC_number`, and `COG` terms are aggregated per contig into `functional_terms`.
+- The generated TSV is written under `workdir/converted_annotations.tsv` and then consumed by Stage 2 exactly like a hand-written annotations table.
 
 ---
 
@@ -213,7 +221,7 @@ options:
   --contigs FILE             All contigs FASTA (plain or .gz)
   --viral-contigs FILE       Viral / phage contigs FASTA
   --coverage FILE            Per-sample coverage table TSV  [Stage 2]
-  --annotations FILE         Functional annotations TSV     [Stage 2]
+  --annotations FILE         Functional annotations TSV or Prokka directory  [Stage 2]
   --output-dir DIR           Output directory (default: contigweaver_output)
   --minced-bin PATH          Path to minced binary (default: minced)
   --blastn-bin PATH          Path to blastn binary (default: blastn)
@@ -242,7 +250,7 @@ pipeline.run_stage1(
 # Stage 2 (optional)
 pipeline.run_stage2(
     coverage_tsv="coverage.tsv",
-    annotations_tsv="annotations.tsv",   # optional
+    annotations_tsv="annotations.tsv",   # optional TSV or Prokka directory
 )
 
 # Access the networkx graph directly
