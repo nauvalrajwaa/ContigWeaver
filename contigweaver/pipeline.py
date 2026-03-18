@@ -31,8 +31,10 @@ import networkx as nx
 from contigweaver.modules.gfa_parser import GFAParser
 from contigweaver.modules.crispr_miner import CRISPRPhageMiner
 from contigweaver.modules.annotation_converter import prepare_annotations_input
+from contigweaver.modules.annotation_miner import AnnotationMiner
+from contigweaver.modules.binning_miner import BinningMiner
 from contigweaver.modules.contig_reconciler import ContigGraphReconciler
-from contigweaver.modules.graph_exporter import export_graph
+from contigweaver.modules.graph_exporter import export_graph, export_index_report
 from contigweaver.modules.ecological_miner import EcologicalMiner
 
 logger = logging.getLogger("contigweaver")
@@ -80,6 +82,10 @@ class ContigWeaverPipeline:
         self.graph: nx.MultiGraph = nx.MultiGraph()
         self._stage1_gfa_path: Path | None = None
         self._stage1_fasta_paths: list[Path] = []
+        self._stage2_coverage_path: Path | None = None
+        self._stage2_annotations_path: Path | None = None
+        self._stage2_annotation_data_path: Path | None = None
+        self._stage2_binning_path: Path | None = None
 
     # ------------------------------------------------------------------
     # Stage 1
@@ -150,8 +156,10 @@ class ContigWeaverPipeline:
 
     def run_stage2(
         self,
-        coverage_tsv: str | Path,
+        coverage_tsv: Optional[str | Path] = None,
         annotations_tsv: Optional[str | Path] = None,
+        annotation_data_tsv: Optional[str | Path] = None,
+        binning_tsv: Optional[str | Path] = None,
     ) -> None:
         """
         Run Stage 2: ecological co-abundance evidence (requires Stage 1 first).
@@ -163,21 +171,54 @@ class ContigWeaverPipeline:
         annotations_tsv : str | Path, optional
             Functional annotations TSV for pathway complementarity.
         """
-        logger.info("=== Stage 2: Ecological Evidence ===")
-        prepared_annotations = prepare_annotations_input(
-            annotations_input=annotations_tsv,
-            work_dir=self.output_dir / "workdir",
-        )
+        if (
+            coverage_tsv is None
+            and annotations_tsv is None
+            and annotation_data_tsv is None
+            and binning_tsv is None
+        ):
+            raise ValueError(
+                "Stage 2 requires at least one input: --coverage, --annotations, --annotation-data, or --binning."
+            )
 
-        eco_miner = EcologicalMiner(
-            graph=self.graph,
-            r_threshold=self.spearman_threshold,
-            p_threshold=self.p_value_threshold,
+        logger.info("=== Stage 2: Ecological + Annotation + Binning Evidence ===")
+        self._stage2_coverage_path = Path(coverage_tsv) if coverage_tsv else None
+        self._stage2_annotations_path = Path(annotations_tsv) if annotations_tsv else None
+        self._stage2_annotation_data_path = (
+            Path(annotation_data_tsv) if annotation_data_tsv else None
         )
-        eco_miner.run(
-            coverage_tsv=coverage_tsv,
-            annotations_tsv=prepared_annotations,
-        )
+        self._stage2_binning_path = Path(binning_tsv) if binning_tsv else None
+
+        prepared_annotations: Optional[str | Path] = None
+        if annotations_tsv is not None:
+            prepared_annotations = prepare_annotations_input(
+                annotations_input=annotations_tsv,
+                work_dir=self.output_dir / "workdir",
+            )
+
+        if coverage_tsv is not None:
+            eco_miner = EcologicalMiner(
+                graph=self.graph,
+                r_threshold=self.spearman_threshold,
+                p_threshold=self.p_value_threshold,
+            )
+            eco_miner.run(
+                coverage_tsv=coverage_tsv,
+                annotations_tsv=prepared_annotations,
+            )
+
+        self._reconcile_contig_ids()
+
+        annotation_input = annotation_data_tsv or prepared_annotations
+        if annotation_input is not None:
+            logger.info("--- Stage 2A: Annotation Miner ---")
+            annotation_miner = AnnotationMiner(graph=self.graph)
+            annotation_miner.run(annotation_input)
+
+        if binning_tsv is not None:
+            logger.info("--- Stage 2B: Binning Miner ---")
+            binning_miner = BinningMiner(graph=self.graph)
+            binning_miner.run(binning_tsv)
 
         logger.info(
             "After Stage 2: %d nodes, %d edges",
@@ -222,13 +263,57 @@ class ContigWeaverPipeline:
     def _export(self, viral_set: set[str]) -> None:
         tsv_path = self.output_dir / "contigweaver_edges.tsv"
         html_path = self.output_dir / "contigweaver_network.html"
+        index_path = self.output_dir / "index.html"
         export_graph(
             graph=self.graph,
             tsv_path=tsv_path,
             html_path=html_path,
             viral_contigs=viral_set,
         )
+        export_index_report(
+            graph=self.graph,
+            output_path=index_path,
+            network_html_path=html_path,
+            edges_tsv_path=tsv_path,
+            viral_contigs=viral_set,
+            input_paths=self._report_inputs(),
+            related_html_paths=self._discover_related_html_reports(),
+        )
         logger.info("Outputs saved to %s", self.output_dir)
+
+    def _report_inputs(self) -> dict[str, Path | None]:
+        return {
+            "Assembly graph": self._stage1_gfa_path,
+            "Contigs FASTA": self._stage1_fasta_paths[0] if self._stage1_fasta_paths else None,
+            "Viral contigs FASTA": self._stage1_fasta_paths[1] if len(self._stage1_fasta_paths) > 1 else None,
+            "Coverage TSV": self._stage2_coverage_path,
+            "Annotations": self._stage2_annotations_path,
+            "Annotation miner TSV": self._stage2_annotation_data_path,
+            "Binning TSV": self._stage2_binning_path,
+        }
+
+    def _discover_related_html_reports(self) -> list[Path]:
+        if self._stage1_gfa_path is None:
+            return []
+
+        roots = {
+            self._stage1_gfa_path.parent,
+            *(path.parent for path in self._stage1_fasta_paths),
+        }
+        related: list[Path] = []
+        seen: set[Path] = set()
+        for root in roots:
+            for candidate_root in (root / "QC", root):
+                if not candidate_root.exists():
+                    continue
+                for html_path in sorted(candidate_root.glob("**/*.html")):
+                    if html_path in seen:
+                        continue
+                    seen.add(html_path)
+                    related.append(html_path)
+                    if len(related) >= 6:
+                        return related
+        return related
 
 
 # ===========================================================================
@@ -273,6 +358,19 @@ def build_parser() -> argparse.ArgumentParser:
             "TSV must contain Contig_ID plus KO_terms/MetaCyc_terms or functional_terms. "
             "Directories are converted to a contig-level TSV automatically for Stage 2."
         ),
+    )
+    stage2.add_argument(
+        "--annotation-data", metavar="FILE", default=None,
+        help=(
+            "Annotation Miner TSV. Required column: Contig_ID. Optional columns: "
+            "taxonomy_label, taxonomy_rank, taxonomy_confidence, functional_terms, "
+            "cas_genes, has_crispr, spacer_count. "
+            "If omitted, --annotations TSV is reused when available."
+        ),
+    )
+    stage2.add_argument(
+        "--binning", metavar="FILE", default=None,
+        help="Binning TSV with Contig_ID and Bin_ID columns.",
     )
 
     # Output
@@ -344,14 +442,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             viral_contigs_fasta=args.viral_contigs,
         )
 
-        if args.coverage:
+        if args.coverage or args.annotations or args.annotation_data or args.binning:
             pipeline.run_stage2(
                 coverage_tsv=args.coverage,
                 annotations_tsv=args.annotations,
+                annotation_data_tsv=args.annotation_data,
+                binning_tsv=args.binning,
             )
         else:
             logger.info(
-                "No --coverage supplied; skipping Stage 2 (ecological evidence)."
+                "No Stage 2 inputs supplied; skipping Stage 2 (ecological/annotation/binning evidence)."
             )
 
     except FileNotFoundError as exc:

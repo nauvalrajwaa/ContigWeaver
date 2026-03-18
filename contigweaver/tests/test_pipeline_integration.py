@@ -1,14 +1,3 @@
-"""
-Integration tests for the ContigNexus pipeline using a compact fixture
-that mirrors the real SPAdes output format from
-results/Assembly/SPAdes/SPAdes-sponge_brin.assembly.gfa.gz.
-
-Coverage:
-- Stage 1: GFA parsing (plain + .gz), CRISPR miner (mocked), graph export
-- Stage 2: ecological miner (co-abundance + pathway)
-- Full pipeline CLI (end-to-end with mocked external tools)
-- Real-data smoke test (skipped when results/ not present)
-"""
 import gzip
 import subprocess
 import sys
@@ -26,18 +15,133 @@ from contigweaver.modules.ecological_miner import (
 )
 from contigweaver.pipeline import ContigWeaverPipeline, build_parser
 
-# real_data marker and REAL_GFA path re-declared here so the module is
-# importable without relying on conftest (pytest auto-loads conftest but does
-# not allow direct imports from it).
-from pathlib import Path as _Path
-
-_REAL_GFA = _Path(__file__).parent.parent.parent / "results/Assembly/SPAdes/SPAdes-sponge_brin.assembly.gfa.gz"
-REAL_GFA = _REAL_GFA
-
-real_data = pytest.mark.skipif(
-    not _REAL_GFA.exists(),
-    reason="Real results/ data not available",
+INPUT_ROOT = Path(__file__).parent.parent.parent / "input"
+REAL_INPUT_GFA = INPUT_ROOT / "SPAdes_Asm" / "SPAdes-sponge_brin.assembly.gfa.gz"
+REAL_INPUT_CONTIGS = INPUT_ROOT / "SPAdes_Asm" / "SPAdes-sponge_brin.contigs.fa"
+REAL_INPUT_VIRAL = (
+    INPUT_ROOT
+    / "SPAdes_Genomad"
+    / "Galaxy48-[geNomad on dataset 43_ virus fasta].fasta"
 )
+REAL_INPUT_PROKKA = INPUT_ROOT / "SPAdes_Prokka"
+REAL_INPUT_PRODIGAL = INPUT_ROOT / "SPAdes_Prodigal" / "sponge_brin"
+INPUT_DATA_READY = all(
+    path.exists()
+    for path in (
+        REAL_INPUT_GFA,
+        REAL_INPUT_CONTIGS,
+        REAL_INPUT_VIRAL,
+        REAL_INPUT_PROKKA,
+        REAL_INPUT_PRODIGAL,
+    )
+)
+input_data = pytest.mark.skipif(
+    not INPUT_DATA_READY,
+    reason="Real input/ data not available",
+)
+
+
+def _copy_gfa_subset(
+    source: Path,
+    destination: Path,
+    segment_limit: int,
+    link_limit: int,
+) -> Path:
+    kept_segments: set[str] = set()
+    kept_links = 0
+
+    with gzip.open(source, "rt") as src, destination.open("w") as dst:
+        for line in src:
+            if line.startswith("H\t"):
+                dst.write(line)
+                continue
+
+            if line.startswith("S\t"):
+                if len(kept_segments) >= segment_limit:
+                    continue
+                segment_id = line.split("\t", 2)[1]
+                kept_segments.add(segment_id)
+                dst.write(line)
+                continue
+
+            if not line.startswith("L\t"):
+                continue
+
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 5:
+                continue
+
+            if fields[1] in kept_segments and fields[3] in kept_segments:
+                dst.write(line)
+                kept_links += 1
+                if len(kept_segments) >= segment_limit and kept_links >= link_limit:
+                    break
+
+    return destination
+
+
+def _copy_first_fasta_records(source: Path, destination: Path, record_limit: int) -> Path:
+    record_count = 0
+    writing = False
+
+    with source.open() as src, destination.open("w") as dst:
+        for line in src:
+            if line.startswith(">"):
+                if record_count >= record_limit:
+                    break
+                record_count += 1
+                writing = True
+
+            if writing:
+                dst.write(line)
+
+    return destination
+
+
+def _read_fasta_ids(fasta_path: Path) -> list[str]:
+    contig_ids: list[str] = []
+    with fasta_path.open() as fh:
+        for line in fh:
+            if line.startswith(">"):
+                contig_ids.append(line[1:].strip().split()[0])
+    return contig_ids
+
+
+def _write_header_derived_coverage(contigs_fasta: Path, output_tsv: Path) -> Path:
+    contig_ids = _read_fasta_ids(contigs_fasta)
+    output_tsv.write_text(
+        "Contig_ID\tsample_1\tsample_2\tsample_3\n"
+        + "\n".join(
+            f"{contig_id}\t{index + 1}\t{(index + 1) * 2}\t{(index + 1) * 3}"
+            for index, contig_id in enumerate(contig_ids)
+        )
+        + "\n"
+    )
+    return output_tsv
+
+
+def _build_real_input_subset(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    subset_gfa = _copy_gfa_subset(
+        REAL_INPUT_GFA,
+        tmp_path / "input_subset.gfa",
+        segment_limit=120,
+        link_limit=24,
+    )
+    subset_contigs = _copy_first_fasta_records(
+        REAL_INPUT_CONTIGS,
+        tmp_path / "input_subset_contigs.fa",
+        record_limit=24,
+    )
+    subset_viral = _copy_first_fasta_records(
+        REAL_INPUT_VIRAL,
+        tmp_path / "input_subset_viral.fa",
+        record_limit=8,
+    )
+    coverage_tsv = _write_header_derived_coverage(
+        subset_contigs,
+        tmp_path / "input_subset_coverage.tsv",
+    )
+    return subset_gfa, subset_contigs, subset_viral, coverage_tsv
 
 
 # ===========================================================================
@@ -206,6 +310,9 @@ class TestStage1Integration:
 
         html = tmp_path / "contigweaver_network.html"
         assert html.exists() and html.stat().st_size > 500
+        index_html = tmp_path / "index.html"
+        assert index_html.exists()
+        assert "ContigWeaver Comprehensive Report" in index_html.read_text()
 
     def test_stage1_graph_has_6_nodes(
         self,
@@ -291,6 +398,52 @@ class TestStage2Integration:
         pipeline.run_stage2(mini_coverage_tsv)
         tsv = tmp_path / "contigweaver_edges.tsv"
         assert tsv.exists()
+        assert (tmp_path / "index.html").exists()
+
+    def test_stage2_annotation_and_binning_layers(
+        self,
+        tmp_path,
+        mini_gfa_file,
+        mini_contigs_fasta,
+        mini_viral_fasta,
+        mini_coverage_tsv,
+    ):
+        pipeline = ContigWeaverPipeline(output_dir=tmp_path)
+        with patch("subprocess.run") as mock_run, patch(
+            "contigweaver.modules.crispr_miner.SpacerExtractor.extract_to_fasta",
+            return_value=0,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            pipeline.run_stage1(mini_gfa_file, mini_contigs_fasta, mini_viral_fasta)
+
+        annotation_data = tmp_path / "annotation_data.tsv"
+        annotation_data.write_text(
+            "Contig_ID\ttaxonomy_label\ttaxonomy_rank\ttaxonomy_confidence\tfunctional_terms\tcas_genes\thas_crispr\tspacer_count\n"
+            "7\tBacillus\tgenus\t0.99\tCRISPR repeat\t\ttrue\t2\n"
+            "37\tBacillus\tgenus\t0.98\tDNA repair\tCas9\tfalse\t0\n"
+        )
+        binning_data = tmp_path / "binning.tsv"
+        binning_data.write_text(
+            "Contig_ID\tBin_ID\n"
+            "7\tbin_alpha\n"
+        )
+
+        pipeline.run_stage2(
+            coverage_tsv=mini_coverage_tsv,
+            annotation_data_tsv=annotation_data,
+            binning_tsv=binning_data,
+        )
+
+        edge_types = {d["type"] for _, _, d in pipeline.graph.edges(data=True)}
+        assert "functional_operon" in edge_types
+        assert "bin_membership" in edge_types
+
+        rescued_nodes = [
+            node
+            for node, attrs in pipeline.graph.nodes(data=True)
+            if attrs.get("bin_status") == "rescued"
+        ]
+        assert rescued_nodes
 
 
 # ===========================================================================
@@ -299,6 +452,20 @@ class TestStage2Integration:
 
 
 class TestCLIIntegration:
+    def test_parser_accepts_annotation_and_binning_flags(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--gfa", "graph.gfa",
+                "--contigs", "contigs.fa",
+                "--viral-contigs", "viral.fa",
+                "--annotation-data", "annotation_data.tsv",
+                "--binning", "binning.tsv",
+            ]
+        )
+        assert args.annotation_data == "annotation_data.tsv"
+        assert args.binning == "binning.tsv"
+
     def test_cli_stage1_returns_0(
         self,
         tmp_path,
@@ -363,71 +530,69 @@ class TestCLIIntegration:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             main()
         assert (out / "contigweaver_edges.tsv").exists()
+        assert (out / "index.html").exists()
 
 
 # ===========================================================================
-# 5. Real-data smoke tests (skipped when results/ absent)
-# ===========================================================================
+@input_data
+class TestInputDatasetIntegration:
+    def test_real_input_subset_parses_without_error(self, tmp_path):
+        subset_gfa, _, _, _ = _build_real_input_subset(tmp_path)
 
+        graph = parse_gfa(subset_gfa)
 
-@real_data
-class TestRealDataSmoke:
-    """
-    Smoke tests against the actual SPAdes assembly.
-    Run only when results/Assembly/SPAdes/SPAdes-sponge_brin.assembly.gfa.gz
-    is present (CI can skip; local dev runs these automatically).
-    """
+        assert graph.number_of_nodes() >= 1
+        assert graph.number_of_edges() >= 1
 
-    def test_real_gfa_gz_parses_without_error(self):
-        """Real file must parse without exception (spot-checks first 5 segments)."""
-        # Parse only a tiny slice to keep the test fast
-        import gzip as _gz
-        import tempfile, os
+    def test_real_input_stage1_generates_html_report(self, tmp_path):
+        pytest.importorskip("pyvis")
+        subset_gfa, subset_contigs, subset_viral, _ = _build_real_input_subset(tmp_path)
+        pipeline = ContigWeaverPipeline(output_dir=tmp_path / "real_input_stage1")
 
-        # Extract first 50 lines into a temp file
-        lines = []
-        with _gz.open(REAL_GFA, "rt") as fh:
-            for i, line in enumerate(fh):
-                if i >= 50:
-                    break
-                lines.append(line)
+        with patch("subprocess.run") as mock_run, patch(
+            "contigweaver.modules.crispr_miner.SpacerExtractor.extract_to_fasta",
+            return_value=0,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            pipeline.run_stage1(subset_gfa, subset_contigs, subset_viral)
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".gfa", delete=False
-        ) as tf:
-            tf.writelines(lines)
-            tf_path = Path(tf.name)
+        html_report = pipeline.output_dir / "contigweaver_network.html"
+        assert html_report.exists()
+        assert html_report.stat().st_size > 500
+        assert "<html" in html_report.read_text().lower()
+        index_html = pipeline.output_dir / "index.html"
+        assert index_html.exists()
+        assert "Related HTML Reports" in index_html.read_text()
 
-        try:
-            g = parse_gfa(tf_path)
-            # First 50 lines = 1 H + up to 49 S lines
-            assert g.number_of_nodes() >= 1
-        finally:
-            os.unlink(tf_path)
+    def test_cli_full_run_with_real_input_subset_generates_final_html(self, tmp_path):
+        pytest.importorskip("pyvis")
+        subset_gfa, subset_contigs, subset_viral, coverage_tsv = _build_real_input_subset(tmp_path)
+        output_dir = tmp_path / "cli_real_input_out"
+        from contigweaver.pipeline import main
 
-    def test_real_gz_gfa_direct(self):
-        """GFAParser must accept the .gz file path directly."""
-        import gzip as _gz
-        import tempfile, os
+        args = [
+            "--gfa", str(subset_gfa),
+            "--contigs", str(subset_contigs),
+            "--viral-contigs", str(subset_viral),
+            "--coverage", str(coverage_tsv),
+            "--annotations", str(REAL_INPUT_PROKKA),
+            "--output-dir", str(output_dir),
+        ]
+        with patch("sys.argv", ["contigweaver"] + args), patch(
+            "subprocess.run"
+        ) as mock_run, patch(
+            "contigweaver.modules.crispr_miner.SpacerExtractor.extract_to_fasta",
+            return_value=0,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            rc = main()
 
-        # Write a 30-line slice to a gzipped temp file
-        lines = []
-        with _gz.open(REAL_GFA, "rt") as fh:
-            for i, line in enumerate(fh):
-                if i >= 30:
-                    break
-                lines.append(line)
-
-        with tempfile.NamedTemporaryFile(
-            suffix=".gfa.gz", delete=False
-        ) as tf:
-            tf_path = Path(tf.name)
-
-        with _gz.open(tf_path, "wt") as gz_out:
-            gz_out.writelines(lines)
-
-        try:
-            g = parse_gfa(tf_path)
-            assert g.number_of_nodes() >= 1
-        finally:
-            os.unlink(tf_path)
+        assert rc == 0
+        assert (output_dir / "contigweaver_edges.tsv").exists()
+        assert (output_dir / "workdir" / "converted_annotations.tsv").exists()
+        html_report = output_dir / "contigweaver_network.html"
+        assert html_report.exists()
+        assert html_report.stat().st_size > 500
+        index_html = output_dir / "index.html"
+        assert index_html.exists()
+        assert "Interactive Network" in index_html.read_text()

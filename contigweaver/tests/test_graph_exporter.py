@@ -7,7 +7,11 @@ from pathlib import Path
 import networkx as nx
 import pytest
 
-from contigweaver.modules.graph_exporter import GraphExporter, export_graph
+from contigweaver.modules.graph_exporter import (
+    GraphExporter,
+    export_graph,
+    export_index_report,
+)
 
 
 @pytest.fixture()
@@ -72,6 +76,23 @@ def test_tsv_evidence_type_mapping(sample_graph, tmp_path):
     assert "Co-Abundance" in content
 
 
+def test_tsv_evidence_type_mapping_includes_new_layers(tmp_path):
+    graph = nx.MultiGraph()
+    graph.add_node("a", length=800, node_type="unknown")
+    graph.add_node("b", length=950, node_type="unknown")
+    graph.add_node("c", length=1100, node_type="unknown")
+    graph.add_edge("a", "b", type="taxonomic_match", taxonomy_rank="genus", taxonomy_label="Bacillus", confidence_min=0.97)
+    graph.add_edge("a", "c", type="functional_operon", cas_genes="Cas9", support_mode="nearby", distance_hops=1, score=0.5)
+    graph.add_edge("b", "c", type="bin_membership", bin_id="bin_1", assignment_source="rescued", rescue_support_count=2)
+
+    out = tmp_path / "edges.tsv"
+    GraphExporter(graph).export_tsv(out)
+    content = out.read_text()
+    assert "Taxonomic-Match" in content
+    assert "Functional-Operon" in content
+    assert "Bin-Membership" in content
+
+
 # ---------------------------------------------------------------------------
 # HTML export tests (requires pyvis)
 # ---------------------------------------------------------------------------
@@ -96,6 +117,49 @@ def test_html_export_contains_node_labels(sample_graph, tmp_path):
     assert "virus_1" in html
 
 
+def test_html_export_includes_edge_filter_controls_and_node_metadata(tmp_path):
+    graph = nx.MultiGraph()
+    graph.add_node(
+        "host_1",
+        length=1200,
+        node_type="unknown",
+        bin_id="bin_alpha",
+        bin_status="rescued",
+        rescued=True,
+        taxonomy_label="Bacillus",
+        taxonomy_rank="genus",
+        taxonomy_confidence=0.97,
+        cas_genes=["Cas9"],
+        has_crispr=True,
+        spacer_count=2,
+    )
+    graph.add_node("host_2", length=1500, node_type="unknown", bin_id="bin_alpha")
+    graph.add_node("virus_1", length=600, node_type="viral")
+    graph.add_edge("host_1", "virus_1", type="crispr_targeting", identity=99.0, coverage=1.0)
+    graph.add_edge("host_1", "host_2", type="functional_operon", cas_genes="Cas9", support_mode="nearby", distance_hops=1, score=0.5)
+    graph.add_edge("host_1", "host_2", type="taxonomic_match", taxonomy_rank="genus", taxonomy_label="Bacillus", confidence_min=0.95)
+    graph.add_edge("host_1", "host_2", type="bin_membership", bin_id="bin_alpha", assignment_source="rescued", rescue_support_count=2)
+
+    out = tmp_path / "network.html"
+    GraphExporter(graph).export_html(out, viral_contigs={"virus_1"})
+    html = out.read_text()
+    assert "Edge Filters" in html
+    assert 'data-edge-type="taxonomic_match"' in html
+    assert 'data-edge-type="functional_operon"' in html
+    assert 'data-edge-type="bin_membership"' in html
+    assert "Bin: bin_alpha" in html
+    assert "Taxonomy: Bacillus" in html
+
+
+def test_focus_nodes_ignores_bin_membership_only_edges():
+    graph = nx.MultiGraph()
+    graph.add_node("a", length=500, node_type="unknown")
+    graph.add_node("b", length=520, node_type="unknown")
+    graph.add_edge("a", "b", type="bin_membership", bin_id="bin_1")
+    exporter = GraphExporter(graph)
+    assert exporter._focus_nodes() == []
+
+
 def test_export_graph_convenience(sample_graph, tmp_path):
     tsv, html = export_graph(
         sample_graph,
@@ -105,6 +169,33 @@ def test_export_graph_convenience(sample_graph, tmp_path):
     )
     assert tsv.exists()
     assert html.exists()
+
+
+def test_export_index_report_creates_sections(sample_graph, tmp_path):
+    network_html = tmp_path / "network.html"
+    edges_tsv = tmp_path / "edges.tsv"
+    GraphExporter(sample_graph).export_html(network_html, viral_contigs={"virus_1"})
+    GraphExporter(sample_graph).export_tsv(edges_tsv)
+
+    related_html = tmp_path / "quast.html"
+    related_html.write_text("<html><body><h1>QUAST</h1></body></html>")
+
+    index_html = export_index_report(
+        sample_graph,
+        output_path=tmp_path / "index.html",
+        network_html_path=network_html,
+        edges_tsv_path=edges_tsv,
+        viral_contigs={"virus_1"},
+        input_paths={"Assembly graph": tmp_path / "assembly.gfa"},
+        related_html_paths=[related_html],
+    )
+
+    content = index_html.read_text()
+    assert index_html.exists()
+    assert "ContigWeaver Comprehensive Report" in content
+    assert "Interactive Network" in content
+    assert "Related HTML Reports" in content
+    assert "quast.html" in content
 
 
 def test_prepare_html_graph_samples_large_graph_around_focus_nodes():

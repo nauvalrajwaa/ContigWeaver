@@ -23,7 +23,7 @@ The result is a browsable interactive HTML network — a "contig web" that revea
 |---|---|
 | **Binning-free** | Works directly on contigs from any assembler (SPAdes, MEGAHIT) |
 | **Bridge-aware integration** | Reconciles `NODE_*` contigs back to numeric GFA segments with exact or substring sequence anchors |
-| **Four evidence layers** | Physical overlap · Segment membership · CRISPR targeting · Co-abundance |
+| **Seven evidence layers** | Physical overlap · Segment membership · CRISPR targeting · Co-abundance · Taxonomic match · Functional operon · Bin membership |
 | **Gzip-transparent** | Reads `.gfa.gz` and `.fasta.gz` directly — no manual decompression |
 | **Scalable HTML output** | Full TSV export plus an automatically focused HTML view for very large graphs |
 | **Modular pipeline** | Stage 1 runs with just GFA + contigs; Stage 2 accepts either a ready TSV or a Prokka directory |
@@ -41,12 +41,14 @@ The result is a browsable interactive HTML network — a "contig web" that revea
 | **Contig Reconciler** | Sequence anchors between FASTA contigs and GFA segments | `segment_membership` |
 | **CRISPR-Phage Miner** | MinCED spacer prediction + BLAST vs. viral contigs | `crispr_targeting` |
 
-### Stage 2 — Ecological Evidence (optional)
+### Stage 2 — Ecological + Annotation + Binning Evidence (optional)
 
 | Module | Source | Edge type |
 |---|---|---|
 | **Co-Abundance Correlator** | Per-sample coverage table (Spearman ρ ≥ 0.85) | `co_abundance_guild` |
 | **Pathway Complementarity** | Functional annotations (TSV or converted Prokka directory) | attribute on co-abundance edges |
+| **Annotation Miner** | Taxonomy + functional TSV (`--annotation-data`) | `taxonomic_match`, `functional_operon` |
+| **Binning Miner** | Contig-to-bin TSV (`--binning`) | `bin_membership` + rescued bin metadata on nodes |
 
 ---
 
@@ -106,6 +108,8 @@ python main.py \
   --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
   --coverage "tmp_real_annotation_eval/coverage_from_headers.tsv" \
   --annotations "input/SPAdes_Prokka" \
+  --annotation-data "annotation_data.tsv" \
+  --binning "binning.tsv" \
   --output-dir contigweaver_output/ \
   --verbose
 ```
@@ -125,6 +129,36 @@ For large real assemblies, ContigWeaver always writes the **full TSV** and then 
 | `--viral-contigs` | FASTA | Viral / phage contig subset (see [Identifying viral contigs](#identifying-viral-contigs)) |
 | `--coverage` *(optional)* | TSV: `Contig_ID \| sample_1 \| sample_2 \| …` | Per-sample coverage — minimum 3 samples required |
 | `--annotations` *(optional)* | TSV or Prokka directory | TSV: `Contig_ID \| KO_terms \| MetaCyc_terms` or `Contig_ID \| functional_terms`; directories of Prokka `.gff`/`.tsv` files are converted automatically |
+| `--annotation-data` *(optional)* | TSV | Annotation Miner input: `Contig_ID` plus optional taxonomy/functional/CRISPR columns |
+| `--binning` *(optional)* | TSV | Binning Miner input: `Contig_ID \| Bin_ID` |
+
+### Annotation Miner TSV format (`--annotation-data`)
+
+- Required: `Contig_ID`
+- Optional taxonomy columns: `taxonomy_label`, `taxonomy_rank`, `taxonomy_confidence`
+- Optional functional columns: `functional_terms`, `cas_genes`
+- Optional CRISPR columns: `has_crispr`, `spacer_count`
+
+Example:
+
+```tsv
+Contig_ID	taxonomy_label	taxonomy_rank	taxonomy_confidence	functional_terms	cas_genes	has_crispr	spacer_count
+NODE_1	Bacillus	genus	0.98	CRISPR repeat,defense		true	3
+NODE_2	Bacillus	genus	0.97	DNA repair	Cas9	false	0
+```
+
+### Binning TSV format (`--binning`)
+
+- Required: `Contig_ID`, `Bin_ID`
+
+Example:
+
+```tsv
+Contig_ID	Bin_ID
+NODE_1	bin_001
+NODE_2	bin_001
+NODE_9	bin_004
+```
 
 ---
 
@@ -134,6 +168,7 @@ For large real assemblies, ContigWeaver always writes the **full TSV** and then 
 |---|---|
 | `contigweaver_edges.tsv` | Full edge list with Source, Target, Evidence_Type, weight, attributes |
 | `contigweaver_network.html` | **Interactive network** — full graph if small, otherwise a focused sampled subgraph around CRISPR / bridge / ecological evidence |
+| `index.html` | Comprehensive run report with overview, evidence breakdown, edge preview, network embed, and related HTML reports |
 | `spacers.fasta` | Extracted CRISPR spacers (Stage 1) |
 | `spacer_vs_viral.tsv` | BLAST hits: spacer → viral contig (identity ≥ 95 %, coverage ≥ 90 %) |
 | `minced_output.txt` | Raw MinCED predictions |
@@ -144,7 +179,7 @@ For large real assemblies, ContigWeaver always writes the **full TSV** and then 
 - `contigweaver_edges.tsv` always contains the complete graph.
 - `contigweaver_network.html` switches to a focused view when the graph exceeds the HTML budget.
 - Current default HTML budget: `1500` nodes and `4000` edges.
-- Focus priority: non-physical evidence first (`segment_membership`, `crispr_targeting`, Stage 2 edges), then local graph neighborhood.
+- Focus priority: non-physical evidence first (`segment_membership`, `crispr_targeting`, `co_abundance_guild`, `functional_operon`, `taxonomic_match`), then local graph neighborhood.
 
 ### Annotation directory support
 
@@ -211,6 +246,7 @@ EOF
 ```
 usage: contigweaver [-h] --gfa FILE --contigs FILE --viral-contigs FILE
                     [--coverage FILE] [--annotations FILE]
+                    [--annotation-data FILE] [--binning FILE]
                     [--output-dir DIR]
                     [--minced-bin PATH] [--blastn-bin PATH] [--makeblastdb-bin PATH]
                     [--spearman-threshold FLOAT] [--p-value-threshold FLOAT]
@@ -222,6 +258,8 @@ options:
   --viral-contigs FILE       Viral / phage contigs FASTA
   --coverage FILE            Per-sample coverage table TSV  [Stage 2]
   --annotations FILE         Functional annotations TSV or Prokka directory  [Stage 2]
+  --annotation-data FILE     Annotation Miner TSV  [Stage 2]
+  --binning FILE             Binning assignments TSV with Contig_ID/Bin_ID  [Stage 2]
   --output-dir DIR           Output directory (default: contigweaver_output)
   --minced-bin PATH          Path to minced binary (default: minced)
   --blastn-bin PATH          Path to blastn binary (default: blastn)
@@ -251,6 +289,8 @@ pipeline.run_stage1(
 pipeline.run_stage2(
     coverage_tsv="coverage.tsv",
     annotations_tsv="annotations.tsv",   # optional TSV or Prokka directory
+    annotation_data_tsv="annotation_data.tsv",  # optional taxonomy/functional layer
+    binning_tsv="binning.tsv",  # optional contig-to-bin mapping + rescue
 )
 
 # Access the networkx graph directly
@@ -271,13 +311,17 @@ contigweaver/
 │   ├── gfa_parser.py            # Module 1 — GFA physical overlap
 │   ├── crispr_miner.py          # Module 2 — CRISPR-phage targeting
 │   ├── graph_exporter.py        # Module 3 — TSV + HTML export
-│   └── ecological_miner.py      # Modules 4–6 — co-abundance + metabolic
+│   ├── ecological_miner.py      # Modules 4–6 — co-abundance + metabolic
+│   ├── annotation_miner.py      # Stage 2A — taxonomy + functional operon links
+│   └── binning_miner.py         # Stage 2B — bin integration + graph-aware rescue
 ├── tests/
 │   ├── conftest.py              # Shared fixtures (mini SPAdes-format GFA)
 │   ├── test_gfa_parser.py
 │   ├── test_crispr_miner.py
 │   ├── test_graph_exporter.py
 │   ├── test_ecological_miner.py
+│   ├── test_annotation_miner.py
+│   ├── test_binning_miner.py
 │   └── test_pipeline_integration.py
 └── data/
     └── example/                 # Small synthetic test dataset
