@@ -232,24 +232,27 @@ class GraphExporter:
         Path
             Path to the written HTML file.
 
-        Raises
-        ------
-        ImportError
-            If pyvis is not installed.
         """
-        try:
-            from pyvis.network import Network  # type: ignore
-        except ImportError as exc:
-            raise ImportError(
-                "PyVis is required for HTML export.\n"
-                "Install it with: pip install pyvis"
-            ) from exc
-
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         viral_set = viral_contigs or set()
         html_graph, html_meta = self._prepare_html_graph(viral_set=viral_set)
+
+        try:
+            from pyvis.network import Network  # type: ignore
+        except ImportError:
+            self._write_fallback_html(
+                output_path=output_path,
+                html_graph=html_graph,
+                viral_set=viral_set,
+                html_meta=html_meta,
+            )
+            logger.warning(
+                "PyVis is not installed; wrote non-interactive HTML fallback to %s.",
+                output_path,
+            )
+            return output_path
 
         net = Network(
             height=height,
@@ -353,6 +356,129 @@ class GraphExporter:
         )
         logger.info("Interactive HTML visualization written to %s.", output_path)
         return output_path
+
+    def _write_fallback_html(
+        self,
+        output_path: Path,
+        html_graph: nx.MultiGraph,
+        viral_set: set[str],
+        html_meta: Mapping[str, object],
+    ) -> None:
+        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        node_count = html_graph.number_of_nodes()
+        edge_count = html_graph.number_of_edges()
+        viral_count = sum(
+            1
+            for node, attrs in html_graph.nodes(data=True)
+            if self._is_viral_node(str(node), attrs, viral_set)
+        )
+        evidence_counts = Counter(
+            str(data.get("type", "unknown"))
+            for _, _, data in html_graph.edges(data=True)
+        )
+        top_nodes = sorted(
+            ((str(node), int(degree)) for node, degree in html_graph.degree()),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:15]
+        preview_rows = []
+        for source, target, data in list(html_graph.edges(data=True))[:40]:
+            edge_type = str(data.get("type", "unknown"))
+            preview_rows.append(
+                "<tr>"
+                f"<td>{escape(str(source))}</td>"
+                f"<td>{escape(str(target))}</td>"
+                f"<td>{escape(edge_type)}</td>"
+                f"<td>{escape(GraphExporter._get_weight(edge_type, data))}</td>"
+                "</tr>"
+            )
+
+        evidence_rows = "\n".join(
+            "<tr>"
+            f"<td>{escape(self._edge_type_display_name(edge_type))}</td>"
+            f"<td>{count:,}</td>"
+            "</tr>"
+            for edge_type, count in sorted(evidence_counts.items())
+        ) or '<tr><td colspan="2">No edges exported.</td></tr>'
+
+        degree_rows = "\n".join(
+            "<tr>"
+            f"<td>{escape(node)}</td>"
+            f"<td>{degree:,}</td>"
+            "</tr>"
+            for node, degree in top_nodes
+        ) or '<tr><td colspan="2">No nodes available.</td></tr>'
+
+        edge_preview_html = "\n".join(preview_rows) or '<tr><td colspan="4">No edges available.</td></tr>'
+        sampled = "yes" if bool(html_meta.get("sampled")) else "no"
+        hairball_filtered = "yes" if bool(html_meta.get("hairball_filtered")) else "no"
+        ego_center = html_meta.get("ego_center")
+        ego_center_display = escape(str(ego_center)) if ego_center else "not selected"
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ContigWeaver Network Report (Fallback)</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, sans-serif; background: #f6f8fa; color: #182430; }}
+    main {{ max-width: 1200px; margin: 0 auto; padding: 24px; display: grid; gap: 20px; }}
+    section {{ background: #ffffff; border: 1px solid #d0d7de; border-radius: 12px; padding: 18px; }}
+    h1, h2 {{ margin-top: 0; }}
+    .muted {{ color: #57606a; }}
+    .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }}
+    .stat {{ background: #f6fbff; border: 1px solid #dce9f5; border-radius: 10px; padding: 12px; }}
+    .stat strong {{ display: block; font-size: 1.6rem; margin-bottom: 4px; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #eaeef2; vertical-align: top; }}
+    th {{ color: #57606a; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; }}
+    code {{ background: #eef2f6; padding: 2px 6px; border-radius: 6px; }}
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>ContigWeaver Network Report (Fallback HTML)</h1>
+      <p class="muted">Generated {escape(generated_at)}. Interactive visualization is unavailable because <code>pyvis</code> is not installed in this environment. Install it with <code>pip install pyvis</code> for the full interactive graph.</p>
+      <div class="stats">
+        <div class="stat"><strong>{node_count:,}</strong><span>Nodes in exported subgraph</span></div>
+        <div class="stat"><strong>{edge_count:,}</strong><span>Edges in exported subgraph</span></div>
+        <div class="stat"><strong>{viral_count:,}</strong><span>Viral nodes in subgraph</span></div>
+      </div>
+      <p class="muted">Sampling applied: {sampled} · Hairball filtering applied: {hairball_filtered} · Ego center: {ego_center_display}</p>
+    </section>
+
+    <section>
+      <h2>Evidence Breakdown</h2>
+      <table>
+        <thead><tr><th>Evidence Type</th><th>Count</th></tr></thead>
+        <tbody>{evidence_rows}</tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Top Connected Nodes</h2>
+      <table>
+        <thead><tr><th>Node</th><th>Degree</th></tr></thead>
+        <tbody>{degree_rows}</tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Edge Preview</h2>
+      <p class="muted">First 40 edges from the exported graph view.</p>
+      <table>
+        <thead><tr><th>Source</th><th>Target</th><th>Type</th><th>Weight / Identity</th></tr></thead>
+        <tbody>{edge_preview_html}</tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>
+"""
+        output_path.write_text(html)
+        logger.info("Fallback HTML report written to %s.", output_path)
 
     def _prepare_html_graph(
         self,
