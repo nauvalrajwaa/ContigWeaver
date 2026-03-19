@@ -106,7 +106,6 @@ python main.py \
   --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
   --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
   --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
-  --coverage "tmp_real_annotation_eval/coverage_from_headers.tsv" \
   --annotations "input/SPAdes_Prokka" \
   --annotation-data "annotation_data.tsv" \
   --binning "binning.tsv" \
@@ -123,7 +122,6 @@ python main.py \
   --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
   --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
   --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
-  --coverage "tmp_real_annotation_eval/coverage_from_headers.tsv" \
   --annotations "input/SPAdes_Prokka" \
   --binning "input/GenomeBinning" \
   --binning-methods all \
@@ -138,13 +136,57 @@ python main.py \
   --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
   --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
   --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
-  --coverage "tmp_real_annotation_eval/coverage_from_headers.tsv" \
   --annotations "input/SPAdes_Prokka" \
   --binning "input/GenomeBinning" \
   --binning-methods metabat2 \
   --output-dir runs/ \
   --verbose
 ```
+
+### How multi-binning works (example: folder contains 3 tool results)
+
+When `--binning` points to a directory, Stage 2 applies a deterministic multi-step mechanism:
+
+1. **Collect binning inputs**
+   - Recursively include existing `*binning*.tsv` files.
+   - Also scan `**/bins/*` for FASTA bin files (`.fa`, `.fasta`, `.fa.gz`, `.fasta.gz`) and auto-derive per-method TSVs into `workdir/` (for example: `metabat2_auto_binning.tsv`).
+2. **Filter by `--binning-methods`**
+   - `auto` (default): no hard filter; use discovered paths as-is.
+   - `all`: include all supported method tags (`dastool`, `metabat2`, `maxbin2`, `concoct`).
+   - `metabat2,maxbin2,...`: keep only matching tagged inputs.
+3. **Match `--annotations` directory to methods (when possible)**
+   - If Prokka GFF paths include method tags, only matching methods are converted.
+   - If method-tagged annotation files exist but none match selected methods, Stage 2 fails fast with a mismatch error.
+   - If annotation files are untagged, all are accepted.
+4. **Apply each binning table sequentially**
+   - Stage 2 runs `BinningMiner` once per selected TSV, in this order:
+     - directory-discovered `*binning*.tsv` files (sorted lexicographically), then
+     - auto-derived `workdir/<method>_auto_binning.tsv` files (sorted by method),
+     - or CLI order when explicit TSV paths are provided.
+   - `bin_membership` edges from every pass are retained in the graph (duplicates for the same node-pair + `bin_id` are skipped).
+   - For contigs that appear in multiple tools, node-level `bin_id`/`bin_status` follow **last applied table wins**.
+
+**Concrete 3-tool folder example**
+
+If `input/GenomeBinning/` contains MetaBAT2, MaxBin2, and CONCOCT outputs:
+
+```bash
+python main.py \
+  --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
+  --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
+  --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
+  --annotations "input/SPAdes_Prokka" \
+  --binning "input/GenomeBinning" \
+  --binning-methods metabat2,maxbin2,concoct \
+  --output-dir runs/
+```
+
+Expected behavior:
+
+- `workdir/metabat2_auto_binning.tsv`, `workdir/maxbin2_auto_binning.tsv`, and `workdir/concoct_auto_binning.tsv` are generated (when only FASTA bins are present).
+- All three are applied in Stage 2B.
+- Resulting network includes `bin_membership` evidence from all selected methods.
+- `index.html` records each selected binning input (`Binning TSV #1`, `#2`, `#3`) under run inputs.
 
 ### Comprehensive command example
 
@@ -153,7 +195,6 @@ python main.py \
   --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
   --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
   --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
-  --coverage "tmp_real_annotation_eval/coverage_from_headers.tsv" \
   --annotations "input/SPAdes_Prokka" \
   --annotation-data "annotation_data.tsv" \
   --binning "binning.tsv" \
@@ -184,7 +225,7 @@ For large real assemblies, ContigWeaver always writes the **full TSV** and then 
 | `--gfa` | GFA v1 (plain or `.gz`) | Assembly graph from SPAdes or MEGAHIT |
 | `--contigs` | FASTA (plain or `.gz`) | All assembled contigs |
 | `--viral-contigs` | FASTA | Viral / phage contig subset (see [Identifying viral contigs](#identifying-viral-contigs)) |
-| `--coverage` *(optional)* | TSV: `Contig_ID \| sample_1 \| sample_2 \| …` | Per-sample coverage — minimum 3 samples required |
+| `--coverage` *(optional)* | TSV: `Contig_ID \| sample_1 \| sample_2 \| …` | Per-sample coverage. If omitted, ContigWeaver auto-generates `workdir/auto_generated_coverage.tsv` each run (minimum 3 sample columns). |
 | `--annotations` *(optional)* | TSV or Prokka directory | TSV: `Contig_ID \| KO_terms \| MetaCyc_terms` or `Contig_ID \| functional_terms`; directories of Prokka `.gff`/`.tsv` files are converted automatically and filtered to match selected binning methods when method tags are detectable |
 | `--annotation-data` *(optional)* | TSV | Annotation Miner input: `Contig_ID` plus optional taxonomy/functional/CRISPR columns |
 | `--binning` *(optional)* | one or more TSV files or directories | Binning Miner input(s): `Contig_ID \| Bin_ID`; directory inputs are scanned recursively for `*binning*.tsv` |
@@ -228,6 +269,7 @@ NODE_9	bin_004
 | `contigweaver_network.html` | **Interactive network** — full graph if small; otherwise a focused ego-view around the top actor with evidence-layer controls and auto summary |
 | `index.html` | Comprehensive run report with overview, evidence breakdown, edge preview, network embed, related HTML reports, and automated multi-evidence Key Findings |
 | `run.log` | Per-run log file with start/end time, arguments, module progress, stats, warnings, and errors |
+| `workdir/auto_generated_coverage.tsv` | Auto-generated accepted-format coverage table (always created from Stage 1 contig headers for each run) |
 | `spacers.fasta` | Extracted CRISPR spacers (Stage 1) |
 | `spacer_vs_viral.tsv` | BLAST hits: spacer → viral contig (identity ≥ 95 %, coverage ≥ 90 %) |
 | `minced_output.txt` | Raw MinCED predictions |
@@ -324,7 +366,7 @@ options:
   --gfa FILE                 Assembly graph (GFA v1, plain or .gz)
   --contigs FILE             All contigs FASTA (plain or .gz)
   --viral-contigs FILE       Viral / phage contigs FASTA
-  --coverage FILE            Per-sample coverage table TSV  [Stage 2]
+  --coverage FILE            Optional per-sample coverage TSV; auto-generated if omitted  [Stage 2]
   --annotations FILE         Functional annotations TSV or Prokka directory  [Stage 2]
   --annotation-data FILE     Annotation Miner TSV  [Stage 2]
   --binning FILE_OR_DIR [FILE_OR_DIR ...]
