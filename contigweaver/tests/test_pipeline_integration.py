@@ -455,6 +455,51 @@ class TestStage2Integration:
         ]
         assert rescued_nodes
 
+    def test_stage2_supports_binning_directory_with_fasta_bins(self, tmp_path):
+        pipeline = ContigWeaverPipeline(output_dir=tmp_path)
+        pipeline.graph.add_node("7", length=1000, node_type="unknown")
+        pipeline.graph.add_node("37", length=1200, node_type="unknown")
+        pipeline.graph.add_node("5", length=900, node_type="unknown")
+        pipeline.graph.add_node("6", length=950, node_type="unknown")
+
+        binning_root = tmp_path / "GenomeBinning"
+        metabat_bins = binning_root / "MetaBAT2" / "bins"
+        maxbin_bins = binning_root / "MaxBin2" / "bins"
+        concoct_bins = binning_root / "CONCOCT" / "bins"
+        metabat_bins.mkdir(parents=True)
+        maxbin_bins.mkdir(parents=True)
+        concoct_bins.mkdir(parents=True)
+
+        with gzip.open(metabat_bins / "SPAdes-MetaBAT2-sample.1.fa.gz", "wt") as fh:
+            fh.write(">7\nACGT\n>37\nACGT\n")
+        with gzip.open(maxbin_bins / "SPAdes-MaxBin2-sample.001.fa.gz", "wt") as fh:
+            fh.write(">5\nACGT\n>6\nACGT\n")
+        with gzip.open(concoct_bins / "SPAdes-CONCOCT-sample_12.fa.gz", "wt") as fh:
+            fh.write(">7\nACGT\n>5\nACGT\n")
+
+        annotation_data = tmp_path / "annotation_data.tsv"
+        annotation_data.write_text(
+            "Contig_ID\ttaxonomy_label\ttaxonomy_rank\ttaxonomy_confidence\tfunctional_terms\n"
+            "7\tBacillus\tgenus\t0.99\tDNA repair\n"
+            "37\tBacillus\tgenus\t0.98\tDNA repair\n"
+            "5\tBacillus\tgenus\t0.98\tCRISPR repeat\n"
+            "6\tBacillus\tgenus\t0.98\tCRISPR repeat\n"
+        )
+
+        pipeline.run_stage2(
+            annotation_data_tsv=annotation_data,
+            binning_tsv=[binning_root],
+            binning_methods="metabat2,maxbin2,concoct",
+        )
+
+        edge_types = {d["type"] for _, _, d in pipeline.graph.edges(data=True)}
+        assert "bin_membership" in edge_types
+
+        workdir = tmp_path / "workdir"
+        assert (workdir / "metabat2_auto_binning.tsv").exists()
+        assert (workdir / "maxbin2_auto_binning.tsv").exists()
+        assert (workdir / "concoct_auto_binning.tsv").exists()
+
 
 # ===========================================================================
 # 4. CLI integration (end-to-end argument parsing + pipeline dispatch)
@@ -474,7 +519,22 @@ class TestCLIIntegration:
             ]
         )
         assert args.annotation_data == "annotation_data.tsv"
-        assert args.binning == "binning.tsv"
+        assert args.binning == ["binning.tsv"]
+        assert args.binning_methods == "auto"
+
+    def test_parser_accepts_multiple_binning_inputs_and_method_selection(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--gfa", "graph.gfa",
+                "--contigs", "contigs.fa",
+                "--viral-contigs", "viral.fa",
+                "--binning", "metabat2.tsv", "maxbin2.tsv", "concoct.tsv",
+                "--binning-methods", "metabat2,maxbin2,concoct",
+            ]
+        )
+        assert args.binning == ["metabat2.tsv", "maxbin2.tsv", "concoct.tsv"]
+        assert args.binning_methods == "metabat2,maxbin2,concoct"
 
     def test_cli_stage1_returns_0(
         self,

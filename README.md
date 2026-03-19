@@ -114,6 +114,38 @@ python main.py \
   --verbose
 ```
 
+### Flexible binning + annotation matching
+
+Use all available methods from a binning folder (auto-discover `*binning*.tsv`):
+
+```bash
+python main.py \
+  --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
+  --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
+  --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
+  --coverage "tmp_real_annotation_eval/coverage_from_headers.tsv" \
+  --annotations "input/SPAdes_Prokka" \
+  --binning "input/GenomeBinning" \
+  --binning-methods all \
+  --output-dir runs/ \
+  --verbose
+```
+
+Use one specific method only:
+
+```bash
+python main.py \
+  --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
+  --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
+  --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
+  --coverage "tmp_real_annotation_eval/coverage_from_headers.tsv" \
+  --annotations "input/SPAdes_Prokka" \
+  --binning "input/GenomeBinning" \
+  --binning-methods metabat2 \
+  --output-dir runs/ \
+  --verbose
+```
+
 ### Comprehensive command example
 
 ```bash
@@ -153,9 +185,10 @@ For large real assemblies, ContigWeaver always writes the **full TSV** and then 
 | `--contigs` | FASTA (plain or `.gz`) | All assembled contigs |
 | `--viral-contigs` | FASTA | Viral / phage contig subset (see [Identifying viral contigs](#identifying-viral-contigs)) |
 | `--coverage` *(optional)* | TSV: `Contig_ID \| sample_1 \| sample_2 \| …` | Per-sample coverage — minimum 3 samples required |
-| `--annotations` *(optional)* | TSV or Prokka directory | TSV: `Contig_ID \| KO_terms \| MetaCyc_terms` or `Contig_ID \| functional_terms`; directories of Prokka `.gff`/`.tsv` files are converted automatically |
+| `--annotations` *(optional)* | TSV or Prokka directory | TSV: `Contig_ID \| KO_terms \| MetaCyc_terms` or `Contig_ID \| functional_terms`; directories of Prokka `.gff`/`.tsv` files are converted automatically and filtered to match selected binning methods when method tags are detectable |
 | `--annotation-data` *(optional)* | TSV | Annotation Miner input: `Contig_ID` plus optional taxonomy/functional/CRISPR columns |
-| `--binning` *(optional)* | TSV | Binning Miner input: `Contig_ID \| Bin_ID` |
+| `--binning` *(optional)* | one or more TSV files or directories | Binning Miner input(s): `Contig_ID \| Bin_ID`; directory inputs are scanned recursively for `*binning*.tsv` |
+| `--binning-methods` *(optional)* | `auto`, `all`, or comma-separated methods | Method filter for both binning file selection and Prokka annotation matching (`dastool`, `metabat2`, `maxbin2`, `concoct`) |
 
 ### Annotation Miner TSV format (`--annotation-data`)
 
@@ -217,6 +250,8 @@ All files above are written inside the run-specific folder (`runs/run_*`) and ne
 - `--annotations` can point directly to a Prokka results directory such as `input/SPAdes_Prokka/`.
 - Contig IDs from per-bin Prokka files are canonicalized back to the Stage 1 assembly FASTA by shared `NODE_<index>`.
 - Prokka `gene`, `product`, `EC_number`, and `COG` terms are aggregated per contig into `functional_terms`.
+- If `--binning` includes method-tagged paths and `--annotations` is a directory with method-tagged subfolders, ContigWeaver automatically matches methods.
+- Use `--binning-methods all` for all detected methods, or set one method (for example `metabat2`) for strict single-method matching.
 - The generated TSV is written under `workdir/converted_annotations.tsv` and then consumed by Stage 2 exactly like a hand-written annotations table.
 
 ---
@@ -277,7 +312,9 @@ EOF
 ```
 usage: contigweaver [-h] --gfa FILE --contigs FILE --viral-contigs FILE
                     [--coverage FILE] [--annotations FILE]
-                    [--annotation-data FILE] [--binning FILE]
+                    [--annotation-data FILE]
+                    [--binning FILE_OR_DIR [FILE_OR_DIR ...]]
+                    [--binning-methods METHODS]
                     [--output-dir DIR]
                     [--minced-bin PATH] [--blastn-bin PATH] [--makeblastdb-bin PATH]
                     [--spearman-threshold FLOAT] [--p-value-threshold FLOAT]
@@ -290,7 +327,10 @@ options:
   --coverage FILE            Per-sample coverage table TSV  [Stage 2]
   --annotations FILE         Functional annotations TSV or Prokka directory  [Stage 2]
   --annotation-data FILE     Annotation Miner TSV  [Stage 2]
-  --binning FILE             Binning assignments TSV with Contig_ID/Bin_ID  [Stage 2]
+  --binning FILE_OR_DIR [FILE_OR_DIR ...]
+                            One or more binning TSVs or directories  [Stage 2]
+  --binning-methods METHODS  auto, all, or comma-separated subset of
+                            dastool, metabat2, maxbin2, concoct  [Stage 2]
   --output-dir DIR           Root output directory for run_* folders (default: runs)
   --minced-bin PATH          Path to minced binary (default: minced)
   --blastn-bin PATH          Path to blastn binary (default: blastn)
@@ -321,7 +361,8 @@ pipeline.run_stage2(
     coverage_tsv="coverage.tsv",
     annotations_tsv="annotations.tsv",   # optional TSV or Prokka directory
     annotation_data_tsv="annotation_data.tsv",  # optional taxonomy/functional layer
-    binning_tsv="binning.tsv",  # optional contig-to-bin mapping + rescue
+    binning_tsv=["metabat2_binning.tsv", "maxbin2_binning.tsv", "concoct_binning.tsv"],
+    binning_methods="metabat2,maxbin2,concoct",  # or "auto" / "all"
 )
 
 # Access the networkx graph directly

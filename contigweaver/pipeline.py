@@ -21,7 +21,9 @@ Usage (Stage 1 + Stage 2):
 """
 
 import argparse
+import csv
 from datetime import datetime
+import gzip
 import logging
 import shlex
 import sys
@@ -33,7 +35,12 @@ import networkx as nx
 
 from contigweaver.modules.gfa_parser import GFAParser
 from contigweaver.modules.crispr_miner import CRISPRPhageMiner
-from contigweaver.modules.annotation_converter import prepare_annotations_input
+from contigweaver.modules.annotation_converter import (
+    METHOD_ALIASES,
+    detect_method_from_text,
+    detect_methods_from_inputs,
+    prepare_annotations_input,
+)
 from contigweaver.modules.annotation_miner import AnnotationMiner
 from contigweaver.modules.binning_miner import BinningMiner
 from contigweaver.modules.contig_reconciler import ContigGraphReconciler
@@ -41,6 +48,101 @@ from contigweaver.modules.graph_exporter import export_graph, export_index_repor
 from contigweaver.modules.ecological_miner import EcologicalMiner
 
 logger = logging.getLogger("contigweaver")
+CANONICAL_BINNING_METHODS = tuple(sorted(METHOD_ALIASES.keys()))
+
+
+def _parse_binning_method_selection(raw_value: str | None) -> set[str] | None:
+    if raw_value is None:
+        return None
+
+    normalized = raw_value.strip().lower()
+    if normalized in {"", "auto"}:
+        return None
+    if normalized == "all":
+        return set(CANONICAL_BINNING_METHODS)
+
+    selected: set[str] = set()
+    for token in raw_value.split(","):
+        item = token.strip().lower()
+        if not item:
+            continue
+        if item == "metabat":
+            item = "metabat2"
+        elif item == "maxbin":
+            item = "maxbin2"
+        if item not in METHOD_ALIASES:
+            valid = ", ".join(["auto", "all", *CANONICAL_BINNING_METHODS])
+            raise ValueError(
+                f"Unknown binning method '{item}' in --binning-methods. Valid values: {valid}."
+            )
+        selected.add(item)
+
+    return selected or None
+
+
+class CompactRepetitionFilter(logging.Filter):
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_signature: tuple[str, int, str] | None = None
+        self._repeat_count = 0
+        self._attached_handler: logging.Handler | None = None
+        self._emitting_summary = False
+
+    def bind_handler(self, handler: logging.Handler) -> None:
+        self._attached_handler = handler
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._emitting_summary:
+            return True
+
+        signature = (record.name, record.levelno, record.getMessage())
+        if self._last_signature is None:
+            self._last_signature = signature
+            return True
+
+        if signature == self._last_signature:
+            self._repeat_count += 1
+            return False
+
+        self._flush_summary(record)
+        self._last_signature = signature
+        return True
+
+    def flush_pending(self) -> None:
+        self._flush_summary(None)
+
+    def _flush_summary(self, template_record: logging.LogRecord | None) -> None:
+        if self._repeat_count <= 0 or self._attached_handler is None:
+            self._repeat_count = 0
+            return
+
+        if template_record is None:
+            summary_record = logging.LogRecord(
+                name="contigweaver",
+                level=logging.INFO,
+                pathname=__file__,
+                lineno=0,
+                msg="Previous message repeated %d times.",
+                args=(self._repeat_count,),
+                exc_info=None,
+            )
+        else:
+            summary_record = logging.LogRecord(
+                name=template_record.name,
+                level=template_record.levelno,
+                pathname=template_record.pathname,
+                lineno=template_record.lineno,
+                msg="Previous message repeated %d times.",
+                args=(self._repeat_count,),
+                exc_info=None,
+            )
+
+        self._repeat_count = 0
+        self._emitting_summary = True
+        try:
+            self._attached_handler.emit(summary_record)
+        finally:
+            self._emitting_summary = False
 
 
 def _detect_stage_label(args: argparse.Namespace) -> str:
@@ -124,7 +226,136 @@ class ContigWeaverPipeline:
         self._stage2_coverage_path: Path | None = None
         self._stage2_annotations_path: Path | None = None
         self._stage2_annotation_data_path: Path | None = None
-        self._stage2_binning_path: Path | None = None
+        self._stage2_binning_paths: list[Path] = []
+
+    def _expand_binning_inputs(
+        self,
+        binning_tsv: Optional[str | Path | list[str | Path]],
+    ) -> list[Path]:
+        if binning_tsv is None:
+            return []
+
+        raw_inputs: list[Path]
+        if isinstance(binning_tsv, (str, Path)):
+            raw_inputs = [Path(binning_tsv)]
+        else:
+            raw_inputs = [Path(value) for value in binning_tsv]
+
+        expanded: list[Path] = []
+        for item in raw_inputs:
+            if item.is_file():
+                expanded.append(item)
+                continue
+            if item.is_dir():
+                candidates = sorted(item.glob("**/*binning*.tsv"))
+                detected_methods = {
+                    method
+                    for method in (
+                        detect_method_from_text(str(path)) for path in candidates
+                    )
+                    if method is not None
+                }
+                derived = self._derive_binning_tsvs_from_bins_directory(
+                    root=item,
+                    skip_methods=detected_methods,
+                )
+                if not candidates and not derived:
+                    raise FileNotFoundError(f"No binning TSV files found in directory: {item}")
+                expanded.extend(candidates)
+                expanded.extend(derived)
+                continue
+            raise FileNotFoundError(f"Binning input not found: {item}")
+
+        deduped: list[Path] = []
+        seen: set[Path] = set()
+        for path in expanded:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            deduped.append(path)
+        return deduped
+
+    @staticmethod
+    def _iter_fasta_headers(path: Path) -> list[str]:
+        open_func = gzip.open if str(path).endswith(".gz") else open
+        headers: list[str] = []
+        with open_func(path, "rt") as fh:
+            for line in fh:
+                if line.startswith(">"):
+                    headers.append(line[1:].strip().split()[0])
+        return headers
+
+    @staticmethod
+    def _bin_id_from_fasta_path(path: Path) -> str:
+        name = path.name
+        for suffix in (".fasta.gz", ".fa.gz", ".fasta", ".fa"):
+            if name.endswith(suffix):
+                return name[: -len(suffix)]
+        return path.stem
+
+    def _derive_binning_tsvs_from_bins_directory(
+        self,
+        root: Path,
+        skip_methods: set[str],
+    ) -> list[Path]:
+        method_to_fastas: dict[str, list[Path]] = {}
+        for fasta_path in sorted(root.glob("**/bins/*")):
+            if not fasta_path.is_file():
+                continue
+            if not any(str(fasta_path).endswith(ext) for ext in (".fa", ".fasta", ".fa.gz", ".fasta.gz")):
+                continue
+            method = detect_method_from_text(str(fasta_path))
+            if method is None or method in skip_methods:
+                continue
+            method_to_fastas.setdefault(method, []).append(fasta_path)
+
+        if not method_to_fastas:
+            return []
+
+        work_dir = self.output_dir / "workdir"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        generated: list[Path] = []
+        for method, fasta_files in sorted(method_to_fastas.items()):
+            out_tsv = work_dir / f"{method}_auto_binning.tsv"
+            with out_tsv.open("w", newline="") as fh:
+                writer = csv.writer(fh, delimiter="\t")
+                writer.writerow(["Contig_ID", "Bin_ID"])
+                for fasta_path in fasta_files:
+                    bin_id = self._bin_id_from_fasta_path(fasta_path)
+                    for contig_id in self._iter_fasta_headers(fasta_path):
+                        writer.writerow([contig_id, bin_id])
+            logger.info(
+                "Derived binning TSV for method '%s' from %d FASTA bin files: %s",
+                method,
+                len(fasta_files),
+                out_tsv,
+            )
+            generated.append(out_tsv)
+
+        return generated
+
+    @staticmethod
+    def _filter_binning_paths_by_methods(
+        binning_paths: list[Path],
+        selected_methods: set[str] | None,
+    ) -> list[Path]:
+        if not selected_methods:
+            return binning_paths
+
+        filtered: list[Path] = []
+        for path in binning_paths:
+            method = detect_method_from_text(str(path))
+            if method is None or method in selected_methods:
+                filtered.append(path)
+
+        if filtered:
+            return filtered
+
+        raise ValueError(
+            "No binning TSV files remained after --binning-methods filtering. "
+            f"Requested methods: {', '.join(sorted(selected_methods))}."
+        )
 
     # ------------------------------------------------------------------
     # Stage 1
@@ -198,7 +429,8 @@ class ContigWeaverPipeline:
         coverage_tsv: Optional[str | Path] = None,
         annotations_tsv: Optional[str | Path] = None,
         annotation_data_tsv: Optional[str | Path] = None,
-        binning_tsv: Optional[str | Path] = None,
+        binning_tsv: Optional[str | Path | list[str | Path]] = None,
+        binning_methods: Optional[str] = None,
     ) -> None:
         """
         Run Stage 2: ecological co-abundance evidence (requires Stage 1 first).
@@ -221,18 +453,33 @@ class ContigWeaverPipeline:
             )
 
         logger.info("=== Stage 2: Ecological + Annotation + Binning Evidence ===")
+        resolved_binning_paths = self._expand_binning_inputs(binning_tsv)
+        selected_methods = _parse_binning_method_selection(binning_methods)
+        selected_binning_paths = self._filter_binning_paths_by_methods(
+            resolved_binning_paths,
+            selected_methods,
+        )
+
         self._stage2_coverage_path = Path(coverage_tsv) if coverage_tsv else None
         self._stage2_annotations_path = Path(annotations_tsv) if annotations_tsv else None
         self._stage2_annotation_data_path = (
             Path(annotation_data_tsv) if annotation_data_tsv else None
         )
-        self._stage2_binning_path = Path(binning_tsv) if binning_tsv else None
+        self._stage2_binning_paths = selected_binning_paths
+
+        annotation_method_selection = selected_methods
+        if annotation_method_selection is None:
+            annotation_method_selection = detect_methods_from_inputs(
+                [str(path) for path in selected_binning_paths]
+            )
 
         prepared_annotations: Optional[str | Path] = None
         if annotations_tsv is not None:
             prepared_annotations = prepare_annotations_input(
                 annotations_input=annotations_tsv,
                 work_dir=self.output_dir / "workdir",
+                binning_input=[str(path) for path in selected_binning_paths],
+                method_selection=annotation_method_selection,
             )
 
         if coverage_tsv is not None:
@@ -254,10 +501,12 @@ class ContigWeaverPipeline:
             annotation_miner = AnnotationMiner(graph=self.graph)
             annotation_miner.run(annotation_input)
 
-        if binning_tsv is not None:
+        if selected_binning_paths:
             logger.info("--- Stage 2B: Binning Miner ---")
             binning_miner = BinningMiner(graph=self.graph)
-            binning_miner.run(binning_tsv)
+            for binning_path in selected_binning_paths:
+                logger.info("Applying binning assignments from %s", binning_path)
+                binning_miner.run(binning_path)
 
         logger.info(
             "After Stage 2: %d nodes, %d edges",
@@ -321,15 +570,20 @@ class ContigWeaverPipeline:
         logger.info("Outputs saved to %s", self.output_dir)
 
     def _report_inputs(self) -> dict[str, Path | None]:
-        return {
+        report_inputs: dict[str, Path | None] = {
             "Assembly graph": self._stage1_gfa_path,
             "Contigs FASTA": self._stage1_fasta_paths[0] if self._stage1_fasta_paths else None,
             "Viral contigs FASTA": self._stage1_fasta_paths[1] if len(self._stage1_fasta_paths) > 1 else None,
             "Coverage TSV": self._stage2_coverage_path,
             "Annotations": self._stage2_annotations_path,
             "Annotation miner TSV": self._stage2_annotation_data_path,
-            "Binning TSV": self._stage2_binning_path,
         }
+        if len(self._stage2_binning_paths) == 1:
+            report_inputs["Binning TSV"] = self._stage2_binning_paths[0]
+        elif self._stage2_binning_paths:
+            for index, path in enumerate(self._stage2_binning_paths, start=1):
+                report_inputs[f"Binning TSV #{index}"] = path
+        return report_inputs
 
     def _discover_related_html_reports(self) -> list[Path]:
         if self._stage1_gfa_path is None:
@@ -395,7 +649,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Functional annotations TSV or Prokka directory. "
             "TSV must contain Contig_ID plus KO_terms/MetaCyc_terms or functional_terms. "
-            "Directories are converted to a contig-level TSV automatically for Stage 2."
+            "Directories are converted to a contig-level TSV automatically for Stage 2 and "
+            "matched to --binning method when method tags are detectable in names."
         ),
     )
     stage2.add_argument(
@@ -408,8 +663,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     stage2.add_argument(
-        "--binning", metavar="FILE", default=None,
-        help="Binning TSV with Contig_ID and Bin_ID columns.",
+        "--binning", metavar="FILE_OR_DIR", nargs="+", default=None,
+        help=(
+            "One or more binning TSV files (Contig_ID, Bin_ID) or directories. "
+            "Directories are scanned recursively for *binning*.tsv files."
+        ),
+    )
+    stage2.add_argument(
+        "--binning-methods", metavar="METHODS", default="auto",
+        help=(
+            "Method selection for binning+annotation matching: auto (default), all, or "
+            f"comma-separated subset from {', '.join(CANONICAL_BINNING_METHODS)}."
+        ),
     )
 
     # Output
@@ -448,7 +713,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def setup_logging(run_dir: str | Path, verbose: bool = False) -> None:
+def setup_logging(run_dir: str | Path, verbose: bool = False) -> list[CompactRepetitionFilter]:
     level = logging.DEBUG if verbose else logging.INFO
     log_path = Path(run_dir) / "run.log"
 
@@ -457,19 +722,30 @@ def setup_logging(run_dir: str | Path, verbose: bool = False) -> None:
     root_logger.handlers.clear()
 
     formatter = logging.Formatter(
-        fmt="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
+        fmt="%(asctime)s %(levelname).1s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setLevel(level)
     stream_handler.setFormatter(formatter)
+    stream_filter = CompactRepetitionFilter()
+    stream_filter.bind_handler(stream_handler)
+    stream_handler.addFilter(stream_filter)
     root_logger.addHandler(stream_handler)
 
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
+    file_filter = CompactRepetitionFilter()
+    file_filter.bind_handler(file_handler)
+    file_handler.addFilter(file_filter)
     root_logger.addHandler(file_handler)
+
+    for noisy_logger in ("matplotlib", "numexpr", "urllib3", "asyncio"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
+    return [stream_filter, file_filter]
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -479,7 +755,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     stage_label = _detect_stage_label(args)
     run_dir = _create_run_directory(args.output_dir, stage_label)
-    setup_logging(run_dir=run_dir, verbose=args.verbose)
+    repetition_filters = setup_logging(run_dir=run_dir, verbose=args.verbose)
 
     logger.info("ContigWeaver v1.0.0 — starting pipeline.")
     logger.info("Run directory: %s", run_dir)
@@ -509,6 +785,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 annotations_tsv=args.annotations,
                 annotation_data_tsv=args.annotation_data,
                 binning_tsv=args.binning,
+                binning_methods=args.binning_methods,
             )
         else:
             logger.info(
@@ -533,6 +810,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     logger.info("Pipeline finished at: %s", end_ts.isoformat(timespec="seconds"))
     logger.info("Pipeline duration: %.2f seconds", duration_s)
     logger.info("Pipeline complete. Results in: %s", run_dir)
+
+    for repetition_filter in repetition_filters:
+        repetition_filter.flush_pending()
+    for handler in logging.getLogger().handlers:
+        handler.flush()
     return 0
 
 

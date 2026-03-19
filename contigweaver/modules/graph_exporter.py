@@ -249,7 +249,7 @@ class GraphExporter:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         viral_set = viral_contigs or set()
-        html_graph, html_meta = self._prepare_html_graph()
+        html_graph, html_meta = self._prepare_html_graph(viral_set=viral_set)
 
         net = Network(
             height=height,
@@ -259,12 +259,30 @@ class GraphExporter:
             notebook=False,
         )
         net.force_atlas_2based()
-        if html_meta["sampled"]:
+        ego_center = html_meta.get("ego_center")
+        ego_center_value = ego_center if isinstance(ego_center, str) else None
+
+        heading_bits = []
+        if bool(html_meta.get("hairball_filtered")):
+            heading_bits.append("hairball filtered")
+        if ego_center_value is not None:
+            heading_bits.append(f"ego center: {ego_center_value}")
+        if bool(html_meta.get("sampled")):
+            heading_bits.append("sampled")
+        if heading_bits:
+            nodes_raw = html_meta.get("nodes")
+            edges_raw = html_meta.get("edges")
+            nodes_count = int(nodes_raw) if isinstance(nodes_raw, (int, float)) else html_graph.number_of_nodes()
+            edges_count = int(edges_raw) if isinstance(edges_raw, (int, float)) else html_graph.number_of_edges()
             net.heading = (
                 "ContigWeaver Focused HTML View "
-                f"({html_meta['nodes']} nodes, {html_meta['edges']} edges from "
-                f"{self.graph.number_of_nodes():,}/{self.graph.number_of_edges():,})"
+                f"({nodes_count} nodes, {edges_count} edges from "
+                f"{self.graph.number_of_nodes():,}/{self.graph.number_of_edges():,}; "
+                + ", ".join(heading_bits)
+                + ")"
             )
+
+        auto_summary = self._build_auto_summary(html_graph, viral_set, ego_center_value)
 
         # Add nodes
         for node, attrs in html_graph.nodes(data=True):
@@ -331,36 +349,46 @@ class GraphExporter:
         self._inject_edge_type_filters(
             output_path,
             sorted({str(data.get("type", "unknown")) for _, _, data in html_graph.edges(data=True)}),
+            summary_text=auto_summary,
         )
         logger.info("Interactive HTML visualization written to %s.", output_path)
         return output_path
 
     def _prepare_html_graph(
         self,
+        viral_set: Optional[set[str]] = None,
         max_nodes: int = HTML_MAX_NODES,
         max_edges: int = HTML_MAX_EDGES,
         focus_hops: int = 1,
-    ) -> tuple[nx.MultiGraph, dict[str, int | bool]]:
+    ) -> tuple[nx.MultiGraph, dict[str, object]]:
+        viral_set = viral_set or set()
+        visual_graph = self._filter_physical_hairball(viral_set)
+        ego_center = self._pick_ego_center(visual_graph, viral_set)
+        if ego_center is not None:
+            visual_graph = nx.ego_graph(visual_graph, ego_center, radius=2)
+
         if (
-            self.graph.number_of_nodes() <= max_nodes
-            and self.graph.number_of_edges() <= max_edges
+            visual_graph.number_of_nodes() <= max_nodes
+            and visual_graph.number_of_edges() <= max_edges
         ):
-            return self.graph, {
+            return visual_graph, {
                 "sampled": False,
-                "nodes": self.graph.number_of_nodes(),
-                "edges": self.graph.number_of_edges(),
+                "nodes": visual_graph.number_of_nodes(),
+                "edges": visual_graph.number_of_edges(),
+                "hairball_filtered": True,
+                "ego_center": ego_center,
             }
 
-        focus_nodes = self._focus_nodes()
+        focus_nodes = self._focus_nodes(visual_graph)
         if not focus_nodes:
-            focus_nodes = self._top_degree_nodes(limit=max_nodes)
+            focus_nodes = self._top_degree_nodes(visual_graph, limit=max_nodes)
 
         selected_nodes: set[str] = set(focus_nodes)
         frontier = list(focus_nodes)
         for _ in range(max(focus_hops, 0)):
             next_frontier: list[str] = []
             for node in frontier:
-                for raw_neighbor in self.graph.neighbors(node):
+                for raw_neighbor in visual_graph.neighbors(node):
                     neighbor = str(raw_neighbor)
                     if len(selected_nodes) >= max_nodes:
                         break
@@ -375,16 +403,16 @@ class GraphExporter:
                 break
 
         if len(selected_nodes) < max_nodes:
-            for node in self._top_degree_nodes(limit=max_nodes * 2):
+            for node in self._top_degree_nodes(visual_graph, limit=max_nodes * 2):
                 if len(selected_nodes) >= max_nodes:
                     break
                 selected_nodes.add(node)
 
         subgraph = nx.MultiGraph()
         for node in selected_nodes:
-            if self.graph.has_node(node):
-                subgraph.add_node(node, **self.graph.nodes[node])
-        for u, v, key, data in self.graph.edges(keys=True, data=True):
+            if visual_graph.has_node(node):
+                subgraph.add_node(node, **visual_graph.nodes[node])
+        for u, v, key, data in visual_graph.edges(keys=True, data=True):
             if u in selected_nodes and v in selected_nodes:
                 subgraph.add_edge(u, v, key=key, **data)
         if subgraph.number_of_edges() <= max_edges:
@@ -392,10 +420,12 @@ class GraphExporter:
                 "sampled": True,
                 "nodes": subgraph.number_of_nodes(),
                 "edges": subgraph.number_of_edges(),
+                "hairball_filtered": True,
+                "ego_center": ego_center,
             }
 
         edge_rows: list[tuple[tuple[str, str, int], dict, tuple[int, int, int]]] = []
-        degrees = {str(node): int(degree) for node, degree in self.graph.degree()}
+        degrees = {str(node): int(degree) for node, degree in visual_graph.degree()}
         for u, v, key, data in subgraph.edges(keys=True, data=True):
             edge_type = data.get("type", "unknown")
             if edge_type in {
@@ -438,24 +468,101 @@ class GraphExporter:
             "sampled": True,
             "nodes": limited.number_of_nodes(),
             "edges": limited.number_of_edges(),
+            "hairball_filtered": True,
+            "ego_center": ego_center,
         }
 
-    def _focus_nodes(self) -> list[str]:
+    def _focus_nodes(self, graph: nx.MultiGraph) -> list[str]:
         focus_nodes: set[str] = set()
-        for u, v, data in self.graph.edges(data=True):
+        for u, v, data in graph.edges(data=True):
             edge_type = data.get("type")
             if edge_type and edge_type not in {"physical_overlap", "bin_membership"}:
                 focus_nodes.add(u)
                 focus_nodes.add(v)
         return sorted(focus_nodes)
 
-    def _top_degree_nodes(self, limit: int) -> list[str]:
+    def _top_degree_nodes(self, graph: nx.MultiGraph, limit: int) -> list[str]:
         ranked = sorted(
-            ((str(node), int(degree)) for node, degree in self.graph.degree()),
+            ((str(node), int(degree)) for node, degree in graph.degree()),
             key=lambda item: item[1],
             reverse=True,
         )
         return [node for node, _ in ranked[:limit]]
+
+    def _filter_physical_hairball(self, viral_set: set[str]) -> nx.MultiGraph:
+        filtered = nx.MultiGraph()
+        for node, attrs in self.graph.nodes(data=True):
+            filtered.add_node(node, **attrs)
+
+        for u, v, key, data in self.graph.edges(keys=True, data=True):
+            edge_type = str(data.get("type", ""))
+            if edge_type != "physical_overlap":
+                filtered.add_edge(u, v, key=key, **data)
+                continue
+
+            u_is_viral = self._is_viral_node(str(u), self.graph.nodes[u], viral_set)
+            v_is_viral = self._is_viral_node(str(v), self.graph.nodes[v], viral_set)
+            if u_is_viral == v_is_viral:
+                continue
+            filtered.add_edge(u, v, key=key, **data)
+
+        isolates = [node for node in filtered.nodes() if filtered.degree(node) == 0]
+        filtered.remove_nodes_from(isolates)
+        return filtered
+
+    def _pick_ego_center(self, graph: nx.MultiGraph, viral_set: set[str]) -> str | None:
+        if graph.number_of_nodes() == 0:
+            return None
+
+        degree_map = {str(node): int(graph.degree(node)) for node in graph.nodes()}
+        viral_nodes = [
+            node
+            for node in graph.nodes()
+            if self._is_viral_node(str(node), graph.nodes[node], viral_set)
+        ]
+        if viral_nodes:
+            return max(viral_nodes, key=lambda node: (degree_map.get(str(node), 0), str(node)))
+
+        return max(graph.nodes(), key=lambda node: (degree_map.get(str(node), 0), str(node)))
+
+    @staticmethod
+    def _is_viral_node(node_id: str, attrs: Mapping, viral_set: set[str]) -> bool:
+        return node_id in viral_set or attrs.get("node_type") == "viral"
+
+    @staticmethod
+    def _build_auto_summary(graph: nx.MultiGraph, viral_set: set[str], top_node: str | None) -> str:
+        count_crispr = sum(
+            1 for _, _, data in graph.edges(data=True)
+            if data.get("type") == "crispr_targeting"
+        )
+        count_segment = sum(
+            1 for _, _, data in graph.edges(data=True)
+            if data.get("type") == "segment_membership"
+        )
+        count_coab = sum(
+            1 for _, _, data in graph.edges(data=True)
+            if data.get("type") == "co_abundance_guild"
+        )
+
+        if top_node is None or not graph.has_node(top_node):
+            return (
+                "Ringkasan Ekosistem: Ditemukan "
+                f"{count_crispr} interaksi konflik (CRISPR), "
+                f"{count_segment} segmen terikat, dan "
+                f"{count_coab} hubungan ko-abundansi pada subgraf fokus ini."
+            )
+
+        degree = int(graph.degree(top_node))
+        is_viral = top_node in viral_set or graph.nodes[top_node].get("node_type") == "viral"
+        top_label = "Virus" if is_viral else "Kontig"
+        return (
+            "Ringkasan Ekosistem: Ditemukan "
+            f"{count_crispr} interaksi konflik (CRISPR), "
+            f"{count_segment} segmen terikat, dan "
+            f"{count_coab} hubungan ko-abundansi. "
+            f"Target paling aktif adalah {top_node} ({top_label}) "
+            f"dengan {degree} interaksi."
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -615,19 +722,54 @@ class GraphExporter:
         return labels.get(edge_type, edge_type)
 
     @staticmethod
-    def _inject_edge_type_filters(output_path: Path, edge_types: list[str]) -> None:
+    def _inject_edge_type_filters(
+        output_path: Path,
+        edge_types: list[str],
+        summary_text: str,
+    ) -> None:
         if not edge_types:
             return
+
+        default_state = {
+            "crispr_targeting": True,
+            "segment_membership": True,
+            "co_abundance_guild": True,
+            "physical_overlap": False,
+        }
+        ordered_types = [
+            "crispr_targeting",
+            "segment_membership",
+            "co_abundance_guild",
+            "functional_operon",
+            "taxonomic_match",
+            "bin_membership",
+            "physical_overlap",
+        ]
+        sorted_types = []
+        for edge_type in ordered_types:
+            if edge_type in edge_types:
+                sorted_types.append(edge_type)
+        for edge_type in edge_types:
+            if edge_type not in sorted_types:
+                sorted_types.append(edge_type)
 
         html = output_path.read_text()
         control_items = "".join(
             (
                 '<label style="display:inline-flex;align-items:center;gap:6px;margin-right:12px;">'
-                f'<input type="checkbox" data-edge-type="{escape(edge_type)}" checked>'
+                f'<input type="checkbox" data-edge-type="{escape(edge_type)}"'
+                + (" checked" if default_state.get(edge_type, True) else "")
+                + ">"
                 f"{escape(GraphExporter._edge_type_display_name(edge_type))}"
                 "</label>"
             )
-            for edge_type in edge_types
+            for edge_type in sorted_types
+        )
+        summary = (
+            '<div class="cw-auto-summary" '
+            'style="position:fixed;top:10px;right:10px;z-index:9999;background:rgba(12,20,32,0.9);color:#f7f8fa;padding:10px 12px;border:1px solid #3f566e;border-radius:10px;font-family:Arial,sans-serif;font-size:12px;line-height:1.45;max-width:42vw;">'
+            f"{escape(summary_text)}"
+            "</div>"
         )
         controls = (
             '<div class="cw-edge-filter" '
@@ -662,9 +804,9 @@ class GraphExporter:
         )
 
         if "<body>" in html:
-            html = html.replace("<body>", "<body>\n" + controls, 1)
+            html = html.replace("<body>", "<body>\n" + controls + "\n" + summary, 1)
         else:
-            html = controls + html
+            html = controls + summary + html
 
         if "</body>" in html:
             html = html.replace("</body>", script + "\n</body>", 1)
@@ -790,6 +932,60 @@ def export_index_report(
         for node, degree in top_nodes
     ) or '<tr><td colspan="2">No nodes available.</td></tr>'
 
+    pair_evidence: dict[tuple[str, str], set[str]] = {}
+    for source, target, data in graph.edges(data=True):
+        a, b = sorted((str(source), str(target)))
+        pair = (a, b)
+        evidence = pair_evidence.setdefault(pair, set())
+        evidence.add(str(data.get("type", "unknown")))
+
+    finding_rows: list[tuple[int, str]] = []
+    for (a, b), evidence_types in pair_evidence.items():
+        a_is_viral = a in viral_set or graph.nodes[a].get("node_type") == "viral"
+        b_is_viral = b in viral_set or graph.nodes[b].get("node_type") == "viral"
+        if a_is_viral == b_is_viral:
+            continue
+
+        virus = a if a_is_viral else b
+        host = b if a_is_viral else a
+        has_crispr = "crispr_targeting" in evidence_types
+        has_coabundance = "co_abundance_guild" in evidence_types
+        segment_support = _node_has_edge_type(graph, host, "segment_membership") or _node_has_edge_type(
+            graph, virus, "segment_membership"
+        )
+        if not has_crispr:
+            continue
+        if not (has_coabundance or segment_support):
+            continue
+
+        direct_priority = [
+            "crispr_targeting",
+            "co_abundance_guild",
+            "functional_operon",
+            "taxonomic_match",
+            "bin_membership",
+        ]
+        direct_evidence = [edge for edge in direct_priority if edge in evidence_types]
+        rendered_evidence = list(direct_evidence)
+        if segment_support:
+            rendered_evidence.append("segment_membership_context")
+
+        score = len(direct_evidence) + (1 if segment_support else 0)
+        row_html = (
+            "<tr>"
+            f"<td>{escape(host)}</td>"
+            f"<td>{escape(virus)}</td>"
+            f"<td>{score}</td>"
+            f"<td>{escape(', '.join(rendered_evidence))}</td>"
+            "</tr>"
+        )
+        finding_rows.append((score, row_html))
+
+    finding_rows.sort(key=lambda item: item[0], reverse=True)
+    key_findings_rows = "\n".join(row for _, row in finding_rows[:10])
+    if not key_findings_rows:
+        key_findings_rows = '<tr><td colspan="4">No multi-evidence host-virus pairs detected.</td></tr>'
+
     related_sections = []
     for raw_path in related_html_paths:
         path = Path(raw_path)
@@ -876,6 +1072,15 @@ def export_index_report(
     </section>
 
     <section>
+      <h2>Key Findings</h2>
+      <p class="muted">Host-virus candidate pairs supported by combined evidence (CRISPR with co-abundance and/or segment context).</p>
+      <table>
+        <thead><tr><th>Host</th><th>Virus</th><th>Score</th><th>Evidence</th></tr></thead>
+        <tbody>{key_findings_rows}</tbody>
+      </table>
+    </section>
+
+    <section>
       <h2>Inputs Used</h2>
       <table>
         <thead><tr><th>Input</th><th>Path</th><th>Status</th></tr></thead>
@@ -937,3 +1142,12 @@ def export_index_report(
 
 def _relative_link(path: Path, base_dir: Path) -> str:
     return relpath(path, start=base_dir).replace("\\", "/")
+
+
+def _node_has_edge_type(graph: nx.MultiGraph, node_id: str, edge_type: str) -> bool:
+    if not graph.has_node(node_id):
+        return False
+    for _, _, data in graph.edges(node_id, data=True):
+        if data.get("type") == edge_type:
+            return True
+    return False

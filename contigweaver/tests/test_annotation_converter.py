@@ -29,6 +29,20 @@ def _write_mock_prokka_dir(base_dir: Path) -> Path:
     return prokka_dir.parent
 
 
+def _write_prokka_bin(root: Path, folder_name: str, contig_id: str, locus_tag: str, product: str) -> None:
+    bin_dir = root / folder_name
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    stem = folder_name
+    (bin_dir / f"{stem}.gff").write_text(
+        "##gff-version 3\n"
+        f"{contig_id}\tProkka\tCDS\t1\t900\t.\t+\t0\tID={locus_tag};locus_tag={locus_tag};product={product}\n"
+    )
+    (bin_dir / f"{stem}.tsv").write_text(
+        "locus_tag\tftype\tlength_bp\tgene\tEC_number\tCOG\tproduct\n"
+        f"{locus_tag}\tCDS\t900\t\t\t\t{product}\n"
+    )
+
+
 def test_prokka_converter_writes_contig_level_functional_terms(tmp_path: Path):
     prokka_root = _write_mock_prokka_dir(tmp_path)
     output_tsv = tmp_path / "converted.tsv"
@@ -81,3 +95,131 @@ def test_pipeline_stage2_accepts_prokka_directory(tmp_path: Path):
     ]
     assert eco_edges
     assert eco_edges[0]["metabolic_match"] is True
+
+
+def test_prepare_annotations_input_filters_matching_method(tmp_path: Path):
+    prokka_root = tmp_path / "SPAdes_Prokka"
+    _write_prokka_bin(
+        prokka_root,
+        "SPAdes-MetaBAT2-sample.1",
+        "NODE_META",
+        "META_0001",
+        "malate dehydrogenase",
+    )
+    _write_prokka_bin(
+        prokka_root,
+        "SPAdes-MaxBin2-sample.001",
+        "NODE_MAX",
+        "MAX_0001",
+        "nitrate reductase",
+    )
+
+    converted = prepare_annotations_input(
+        prokka_root,
+        tmp_path / "workdir",
+        binning_input="SPAdes-MetaBAT2-sample_contigweaver_binning.tsv",
+    )
+
+    assert converted is not None
+    content = converted.read_text()
+    assert "NODE_META" in content
+    assert "NODE_MAX" not in content
+
+
+def test_prepare_annotations_input_raises_on_detectable_method_mismatch(tmp_path: Path):
+    prokka_root = tmp_path / "SPAdes_Prokka"
+    _write_prokka_bin(
+        prokka_root,
+        "SPAdes-MetaBAT2-sample.1",
+        "NODE_META",
+        "META_0001",
+        "malate dehydrogenase",
+    )
+    _write_prokka_bin(
+        prokka_root,
+        "SPAdes-MaxBin2-sample.001",
+        "NODE_MAX",
+        "MAX_0001",
+        "nitrate reductase",
+    )
+
+    try:
+        prepare_annotations_input(
+            prokka_root,
+            tmp_path / "workdir",
+            binning_input="SPAdes-DASTool-sample_contigweaver_binning.tsv",
+        )
+    except ValueError as exc:
+        message = str(exc)
+        assert "No Prokka annotations matched requested method(s)" in message
+        assert "dastool" in message.lower()
+    else:
+        raise AssertionError("Expected ValueError for mismatched annotation/binning methods")
+
+
+def test_pipeline_stage2_rejects_mismatched_annotation_method_with_binning(tmp_path: Path):
+    prokka_root = tmp_path / "SPAdes_Prokka"
+    _write_prokka_bin(
+        prokka_root,
+        "SPAdes-MetaBAT2-sample.1",
+        "NODE_META",
+        "META_0001",
+        "malate dehydrogenase",
+    )
+    _write_prokka_bin(
+        prokka_root,
+        "SPAdes-MaxBin2-sample.001",
+        "NODE_MAX",
+        "MAX_0001",
+        "nitrate reductase",
+    )
+
+    binning_tsv = tmp_path / "SPAdes-DASTool-sample_contigweaver_binning.tsv"
+    binning_tsv.write_text("Contig_ID\tBin_ID\nNODE_META\tbin_1\n")
+
+    pipeline = ContigWeaverPipeline(output_dir=tmp_path / "out")
+    try:
+        pipeline.run_stage2(annotations_tsv=prokka_root, binning_tsv=binning_tsv)
+    except ValueError as exc:
+        message = str(exc)
+        assert "No Prokka annotations matched requested method(s)" in message
+        assert "dastool" in message.lower()
+    else:
+        raise AssertionError("Expected ValueError for mismatched annotation/binning methods")
+
+
+def test_prepare_annotations_input_accepts_explicit_method_selection_set(tmp_path: Path):
+    prokka_root = tmp_path / "SPAdes_Prokka"
+    _write_prokka_bin(
+        prokka_root,
+        "SPAdes-MetaBAT2-sample.1",
+        "NODE_META",
+        "META_0001",
+        "malate dehydrogenase",
+    )
+    _write_prokka_bin(
+        prokka_root,
+        "SPAdes-MaxBin2-sample.001",
+        "NODE_MAX",
+        "MAX_0001",
+        "nitrate reductase",
+    )
+    _write_prokka_bin(
+        prokka_root,
+        "SPAdes-CONCOCT-sample_12",
+        "NODE_CON",
+        "CON_0001",
+        "sulfate reductase",
+    )
+
+    converted = prepare_annotations_input(
+        prokka_root,
+        tmp_path / "workdir",
+        method_selection={"metabat2", "maxbin2", "concoct"},
+    )
+
+    assert converted is not None
+    content = converted.read_text()
+    assert "NODE_META" in content
+    assert "NODE_MAX" in content
+    assert "NODE_CON" in content

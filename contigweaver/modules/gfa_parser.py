@@ -16,6 +16,7 @@ from typing import Optional
 import networkx as nx
 
 logger = logging.getLogger(__name__)
+PROGRESS_LOG_INTERVAL = 250000
 
 
 class GFAParser:
@@ -86,6 +87,16 @@ class GFAParser:
                     links_found += 1
                 # H (header), P (path), W (walk) lines are intentionally skipped
 
+                if logger.isEnabledFor(logging.DEBUG):
+                    total_records = segments_found + links_found
+                    if total_records > 0 and total_records % PROGRESS_LOG_INTERVAL == 0:
+                        logger.debug(
+                            "GFA parse progress: %d records (%d segments, %d links)",
+                            total_records,
+                            segments_found,
+                            links_found,
+                        )
+
         if segments_found == 0:
             raise ValueError(
                 f"No Segment (S) lines found in {gfa_path}. "
@@ -132,8 +143,6 @@ class GFAParser:
         else:
             self.graph.add_node(name, length=length, node_type="unknown")
 
-        logger.debug("Segment %s  length=%d", name, length)
-
     def _process_link(self, fields: list[str], lineno: int) -> None:
         """Handle a Link (L) line.
 
@@ -156,9 +165,6 @@ class GFAParser:
             if not self.graph.has_node(node):
                 length = self._segment_lengths.get(node, 0)
                 self.graph.add_node(node, length=length, node_type="unknown")
-                logger.debug(
-                    "Node %s auto-created from L line (S line may come later).", node
-                )
 
         self.graph.add_edge(
             from_node,
@@ -168,11 +174,6 @@ class GFAParser:
             to_orient=to_orient,
             overlap_cigar=overlap,
         )
-        logger.debug(
-            "Physical overlap: %s(%s) → %s(%s)  CIGAR=%s",
-            from_node, from_orient, to_node, to_orient, overlap,
-        )
-
     @staticmethod
     def _extract_length_tag(optional_fields: list[str]) -> Optional[int]:
         """Return the integer value of the LN:i:<n> tag, or None if absent."""

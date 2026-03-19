@@ -19,7 +19,7 @@ The three modules are encapsulated in the ``EcologicalMiner`` class.
 import logging
 from itertools import combinations  # noqa: F401 (kept for optional use)
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import networkx as nx
 import pandas as pd
@@ -159,9 +159,40 @@ class CoAbundanceCorrelator:
         # as an observation vector and returns (correlation_matrix, p_matrix).
         # For n_contigs rows and n_samples columns we call it on the
         # *transposed* array so each row is a sample.
-        corr_result = spearmanr(values, axis=1)  # correlate rows (contigs)
-        corr_matrix = np.atleast_2d(corr_result.statistic) if hasattr(corr_result, 'statistic') else np.atleast_2d(corr_result.correlation)
-        pval_matrix = np.atleast_2d(corr_result.pvalue)
+        if n < 2:
+            logger.info("Found 0 correlated contig pairs (need at least 2 contigs).")
+            return pairs
+
+        if n == 2:
+            pair_result: Any = spearmanr(values[0], values[1])
+            r_raw = getattr(pair_result, "statistic", None)
+            if r_raw is None:
+                r_raw = getattr(pair_result, "correlation")
+            p_raw = getattr(pair_result, "pvalue")
+            r_value = float(r_raw)
+            p_value = float(p_raw)
+            if abs(r_value) >= self.r_threshold and p_value < self.p_threshold:
+                pairs.append(
+                    {
+                        "contig_a": contigs[0],
+                        "contig_b": contigs[1],
+                        "spearman_r": r_value,
+                        "p_value": p_value,
+                    }
+                )
+            logger.info(
+                "Found %d correlated contig pairs (|r| >= %.2f, p < %.3f).",
+                len(pairs), self.r_threshold, self.p_threshold,
+            )
+            return pairs
+
+        corr_result: Any = spearmanr(values, axis=1)  # correlate rows (contigs)
+        corr_raw = getattr(corr_result, "statistic", None)
+        if corr_raw is None:
+            corr_raw = getattr(corr_result, "correlation")
+        pval_raw = getattr(corr_result, "pvalue")
+        corr_matrix = np.atleast_2d(corr_raw)
+        pval_matrix = np.atleast_2d(pval_raw)
 
         # Iterate only upper triangle (i < j) to avoid duplicates
         rows_i, cols_j = np.triu_indices(n, k=1)
@@ -252,21 +283,27 @@ class PathwayComplementarityChecker:
             # Support both two-column layout (KO_terms / MetaCyc_terms) and
             # single-column layout (any other non-ID column, e.g. 'functional_terms').
             known_term_cols = {"KO_terms", "MetaCyc_terms"}
+            has_named_term_cols = bool(known_term_cols.intersection(set(df.columns)))
             term_columns = [
                 c for c in df.columns
                 if c != "Contig_ID" and (
                     c in known_term_cols
-                    or not known_term_cols.intersection(df.columns)  # single-col layout
+                    or not has_named_term_cols  # single-col layout
                 )
             ]
 
             for col in term_columns:
-                if pd.notna(row[col]):
-                    terms = [t.strip() for t in str(row[col]).split(",")]
-                    for term in terms:
-                        pathway = self._map.get(term)
-                        if pathway:
-                            pathways.add(pathway)
+                value = row[col]
+                if value is None:
+                    continue
+                value_text = str(value).strip()
+                if len(value_text) == 0 or value_text.lower() == "nan":
+                    continue
+                terms = [t.strip() for t in value_text.split(",")]
+                for term in terms:
+                    pathway = self._map.get(term)
+                    if pathway is not None:
+                        pathways.add(pathway)
 
             self._contig_pathways[contig_id] = pathways
 

@@ -7,6 +7,48 @@ import re
 logger = logging.getLogger(__name__)
 NODE_NUM_RE = re.compile(r"^(NODE_\d+)_")
 
+METHOD_ALIASES: dict[str, tuple[str, ...]] = {
+    "dastool": ("dastool",),
+    "metabat2": ("metabat2", "metabat"),
+    "maxbin2": ("maxbin2", "maxbin"),
+    "concoct": ("concoct",),
+}
+
+
+def _normalize_for_match(value: str) -> str:
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def _detect_method_from_text(value: str) -> str | None:
+    normalized = _normalize_for_match(value)
+    for method, aliases in METHOD_ALIASES.items():
+        if any(alias in normalized for alias in aliases):
+            return method
+    return None
+
+
+def detect_method_from_text(value: str) -> str | None:
+    return _detect_method_from_text(value)
+
+
+def detect_methods_from_inputs(
+    binning_input: str | Path | list[str | Path] | tuple[str | Path, ...] | None,
+) -> set[str]:
+    if binning_input is None:
+        return set()
+
+    if isinstance(binning_input, (str, Path)):
+        values = [str(binning_input)]
+    else:
+        values = [str(value) for value in binning_input]
+
+    methods = {
+        method
+        for value in values
+        if (method := _detect_method_from_text(value)) is not None
+    }
+    return methods
+
 
 class ProkkaAnnotationConverter:
     def convert(
@@ -14,6 +56,8 @@ class ProkkaAnnotationConverter:
         annotations_input: str | Path,
         output_tsv: str | Path,
         reference_contigs_fasta: str | Path | None = None,
+        binning_input: str | Path | list[str | Path] | tuple[str | Path, ...] | None = None,
+        method_selection: set[str] | None = None,
     ) -> Path:
         annotations_input = Path(annotations_input)
         output_tsv = Path(output_tsv)
@@ -22,6 +66,12 @@ class ProkkaAnnotationConverter:
         gff_files = self._discover_gff_files(annotations_input)
         if not gff_files:
             raise ValueError(f"No Prokka GFF files found in: {annotations_input}")
+
+        gff_files = self._select_gff_files_for_binning(
+            gff_files,
+            binning_input,
+            method_selection=method_selection,
+        )
 
         contig_terms: dict[str, set[str]] = defaultdict(set)
         for gff_path in gff_files:
@@ -51,6 +101,52 @@ class ProkkaAnnotationConverter:
         if annotations_input.is_dir():
             return sorted(annotations_input.glob("**/*.gff"))
         return []
+
+    def _select_gff_files_for_binning(
+        self,
+        gff_files: list[Path],
+        binning_input: str | Path | list[str | Path] | tuple[str | Path, ...] | None,
+        method_selection: set[str] | None = None,
+    ) -> list[Path]:
+        if not gff_files:
+            return gff_files
+
+        selected_methods = set(method_selection or set())
+        if not selected_methods:
+            selected_methods = detect_methods_from_inputs(binning_input)
+        if not selected_methods:
+            return gff_files
+
+        methods_present: set[str] = set()
+        filtered: list[Path] = []
+        for gff_path in gff_files:
+            method = _detect_method_from_text(str(gff_path))
+            if method is not None:
+                methods_present.add(method)
+                if method in selected_methods:
+                    filtered.append(gff_path)
+
+        if not methods_present:
+            return gff_files
+
+        if filtered:
+            logger.info(
+                "Matched %d/%d Prokka GFF files to methods: %s.",
+                len(filtered),
+                len(gff_files),
+                ", ".join(sorted(selected_methods)),
+            )
+            return filtered
+
+        available_methods = ", ".join(sorted(methods_present))
+        requested_methods = ", ".join(sorted(selected_methods))
+        raise ValueError(
+            "No Prokka annotations matched requested method(s) "
+            f"'{requested_methods}' from {binning_input}. "
+            f"Detected annotation methods in directory: {available_methods}. "
+            "Provide annotations generated from the same binning method or pass "
+            "a curated contig-level table via --annotation-data."
+        )
 
     def _parse_prokka_tsv(self, tsv_path: Path) -> dict[str, set[str]]:
         if not tsv_path.exists():
@@ -191,6 +287,8 @@ def prepare_annotations_input(
     annotations_input: str | Path | None,
     work_dir: str | Path,
     reference_contigs_fasta: str | Path | None = None,
+    binning_input: str | Path | list[str | Path] | tuple[str | Path, ...] | None = None,
+    method_selection: set[str] | None = None,
 ) -> Path | None:
     if annotations_input is None:
         return None
@@ -204,5 +302,7 @@ def prepare_annotations_input(
             annotations_input,
             output_tsv,
             reference_contigs_fasta=reference_contigs_fasta,
+            binning_input=binning_input,
+            method_selection=method_selection,
         )
     raise FileNotFoundError(f"Annotations input not found: {annotations_input}")

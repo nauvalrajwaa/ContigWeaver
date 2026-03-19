@@ -157,7 +157,7 @@ def test_focus_nodes_ignores_bin_membership_only_edges():
     graph.add_node("b", length=520, node_type="unknown")
     graph.add_edge("a", "b", type="bin_membership", bin_id="bin_1")
     exporter = GraphExporter(graph)
-    assert exporter._focus_nodes() == []
+    assert exporter._focus_nodes(graph) == []
 
 
 def test_export_graph_convenience(sample_graph, tmp_path):
@@ -215,7 +215,9 @@ def test_prepare_html_graph_samples_large_graph_around_focus_nodes():
     exporter = GraphExporter(graph)
     html_graph, meta = exporter._prepare_html_graph(max_nodes=12, max_edges=16, focus_hops=1)
 
-    assert meta["sampled"] is True
+    assert meta["sampled"] is False
+    assert meta["hairball_filtered"] is True
+    assert meta["ego_center"] == "NODE_virus"
     assert html_graph.number_of_nodes() <= 12
     assert html_graph.number_of_edges() <= 16
     assert html_graph.has_node("NODE_host")
@@ -223,3 +225,78 @@ def test_prepare_html_graph_samples_large_graph_around_focus_nodes():
     edge_types = {data["type"] for _, _, data in html_graph.edges(data=True)}
     assert "crispr_targeting" in edge_types
     assert "segment_membership" in edge_types
+
+
+def test_filter_physical_hairball_keeps_only_host_virus_physical_edges():
+    graph = nx.MultiGraph()
+    graph.add_node("host_a", node_type="unknown", length=1000)
+    graph.add_node("host_b", node_type="unknown", length=1100)
+    graph.add_node("virus_a", node_type="viral", length=900)
+    graph.add_node("virus_b", node_type="viral", length=950)
+    graph.add_edge("host_a", "host_b", type="physical_overlap", overlap_cigar="55M")
+    graph.add_edge("virus_a", "virus_b", type="physical_overlap", overlap_cigar="40M")
+    graph.add_edge("host_a", "virus_a", type="physical_overlap", overlap_cigar="25M")
+
+    filtered = GraphExporter(graph)._filter_physical_hairball({"virus_a", "virus_b"})
+    physical_pairs = {
+        frozenset((str(u), str(v)))
+        for u, v, data in filtered.edges(data=True)
+        if data.get("type") == "physical_overlap"
+    }
+
+    assert frozenset(("host_a", "virus_a")) in physical_pairs
+    assert frozenset(("host_a", "host_b")) not in physical_pairs
+    assert frozenset(("virus_a", "virus_b")) not in physical_pairs
+
+
+def test_html_export_filter_defaults_and_auto_summary(tmp_path):
+    graph = nx.MultiGraph()
+    graph.add_node("host_1", node_type="unknown", length=1200)
+    graph.add_node("host_2", node_type="unknown", length=1400)
+    graph.add_node("virus_1", node_type="viral", length=800)
+    graph.add_edge("host_1", "virus_1", type="crispr_targeting", identity=98.5, coverage=0.95)
+    graph.add_edge("host_1", "host_2", type="co_abundance_guild", weight=0.9)
+    graph.add_edge("host_1", "host_2", type="physical_overlap", overlap_cigar="80M")
+    graph.add_edge("host_1", "virus_1", type="physical_overlap", overlap_cigar="45M")
+    graph.add_edge("virus_1", "host_2", type="segment_membership", anchor_length=210)
+
+    out = tmp_path / "network.html"
+    GraphExporter(graph).export_html(out, viral_contigs={"virus_1"})
+    html = out.read_text()
+
+    assert 'data-edge-type="crispr_targeting" checked' in html
+    assert 'data-edge-type="segment_membership" checked' in html
+    assert 'data-edge-type="co_abundance_guild" checked' in html
+    assert 'data-edge-type="physical_overlap">' in html
+    assert 'data-edge-type="physical_overlap" checked' not in html
+    assert "Ringkasan Ekosistem" in html
+
+
+def test_export_index_report_includes_multi_evidence_key_findings(tmp_path):
+    graph = nx.MultiGraph()
+    graph.add_node("host_1", node_type="unknown", length=1500)
+    graph.add_node("host_2", node_type="unknown", length=1300)
+    graph.add_node("virus_1", node_type="viral", length=900)
+    graph.add_edge("host_1", "virus_1", type="crispr_targeting", identity=99.0, coverage=0.98)
+    graph.add_edge("host_1", "virus_1", type="co_abundance_guild", weight=0.91)
+    graph.add_edge("host_2", "virus_1", type="segment_membership", anchor_length=250)
+
+    network_html = tmp_path / "network.html"
+    edges_tsv = tmp_path / "edges.tsv"
+    network_html.write_text("<html><body>network</body></html>")
+    edges_tsv.write_text("Source_Contig\tTarget_Contig\tEvidence_Type\n")
+
+    index_html = export_index_report(
+        graph,
+        output_path=tmp_path / "index.html",
+        network_html_path=network_html,
+        edges_tsv_path=edges_tsv,
+        viral_contigs={"virus_1"},
+    )
+
+    content = index_html.read_text()
+    assert "Key Findings" in content
+    assert "host_1" in content
+    assert "virus_1" in content
+    assert "crispr_targeting" in content
+    assert "co_abundance_guild" in content
