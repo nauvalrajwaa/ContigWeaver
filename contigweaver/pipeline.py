@@ -21,8 +21,11 @@ Usage (Stage 1 + Stage 2):
 """
 
 import argparse
+from datetime import datetime
 import logging
+import shlex
 import sys
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +41,42 @@ from contigweaver.modules.graph_exporter import export_graph, export_index_repor
 from contigweaver.modules.ecological_miner import EcologicalMiner
 
 logger = logging.getLogger("contigweaver")
+
+
+def _detect_stage_label(args: argparse.Namespace) -> str:
+    has_stage2_inputs = any(
+        [
+            args.coverage,
+            args.annotations,
+            args.annotation_data,
+            args.binning,
+        ]
+    )
+    return "stage2" if has_stage2_inputs else "stage1"
+
+
+def _create_run_directory(root_dir: str | Path, stage_label: str) -> Path:
+    runs_root = Path(root_dir)
+    runs_root.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_id = uuid.uuid4().hex[:8]
+    run_dir = runs_root / f"run_{timestamp}_{stage_label}_{unique_id}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+
+    latest_link = runs_root / "latest"
+    tmp_link = runs_root / f".latest_tmp_{unique_id}"
+    try:
+        if tmp_link.exists() or tmp_link.is_symlink():
+            tmp_link.unlink()
+        tmp_link.symlink_to(run_dir.name, target_is_directory=True)
+        tmp_link.replace(latest_link)
+    except OSError as exc:
+        logger.warning("Could not update latest symlink at %s: %s", latest_link, exc)
+        if tmp_link.exists() or tmp_link.is_symlink():
+            tmp_link.unlink()
+
+    return run_dir
 
 
 # ===========================================================================
@@ -376,8 +415,8 @@ def build_parser() -> argparse.ArgumentParser:
     # Output
     out_grp = parser.add_argument_group("Output")
     out_grp.add_argument(
-        "--output-dir", metavar="DIR", default="contigweaver_output",
-        help="Directory for all outputs.",
+        "--output-dir", metavar="DIR", default="runs",
+        help="Root directory for per-run output folders.",
     )
 
     # External tool paths
@@ -409,25 +448,47 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def setup_logging(verbose: bool = False) -> None:
+def setup_logging(run_dir: str | Path, verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
+    log_path = Path(run_dir) / "run.log"
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    root_logger.handlers.clear()
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
     )
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(level)
+    stream_handler.setFormatter(formatter)
+    root_logger.addHandler(stream_handler)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    start_ts = datetime.now()
     parser = build_parser()
     args = parser.parse_args(argv)
-    setup_logging(args.verbose)
+
+    stage_label = _detect_stage_label(args)
+    run_dir = _create_run_directory(args.output_dir, stage_label)
+    setup_logging(run_dir=run_dir, verbose=args.verbose)
 
     logger.info("ContigWeaver v1.0.0 — starting pipeline.")
+    logger.info("Run directory: %s", run_dir)
+    logger.info("Stage mode: %s", stage_label)
+    logger.info("Command: %s", " ".join(shlex.quote(arg) for arg in sys.argv))
+    logger.info("Arguments: %s", vars(args))
 
     pipeline = ContigWeaverPipeline(
-        output_dir=args.output_dir,
+        output_dir=run_dir,
         minced_bin=args.minced_bin,
         blastn_bin=args.blastn_bin,
         makeblastdb_bin=args.makeblastdb_bin,
@@ -456,15 +517,22 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     except FileNotFoundError as exc:
         logger.error("Input file error: %s", exc)
+        logger.info("Pipeline failed at: %s", datetime.now().isoformat(timespec="seconds"))
         return 1
     except RuntimeError as exc:
         logger.error("Pipeline error: %s", exc)
+        logger.info("Pipeline failed at: %s", datetime.now().isoformat(timespec="seconds"))
         return 1
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unexpected error: %s", exc)
+        logger.info("Pipeline failed at: %s", datetime.now().isoformat(timespec="seconds"))
         return 2
 
-    logger.info("Pipeline complete. Results in: %s", args.output_dir)
+    end_ts = datetime.now()
+    duration_s = (end_ts - start_ts).total_seconds()
+    logger.info("Pipeline finished at: %s", end_ts.isoformat(timespec="seconds"))
+    logger.info("Pipeline duration: %.2f seconds", duration_s)
+    logger.info("Pipeline complete. Results in: %s", run_dir)
     return 0
 
 

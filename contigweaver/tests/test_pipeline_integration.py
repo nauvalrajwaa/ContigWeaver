@@ -144,6 +144,16 @@ def _build_real_input_subset(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return subset_gfa, subset_contigs, subset_viral, coverage_tsv
 
 
+def _resolve_latest_run_dir(runs_root: Path) -> Path:
+    latest = runs_root / "latest"
+    if latest.is_symlink():
+        return latest.resolve()
+
+    run_dirs = sorted(path for path in runs_root.glob("run_*") if path.is_dir())
+    assert run_dirs, f"No run_* directories found under {runs_root}"
+    return run_dirs[-1]
+
+
 # ===========================================================================
 # 1. GFA Parser — plain and gzipped real-format files
 # ===========================================================================
@@ -529,8 +539,39 @@ class TestCLIIntegration:
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             main()
-        assert (out / "contigweaver_edges.tsv").exists()
-        assert (out / "index.html").exists()
+        run_dir = _resolve_latest_run_dir(out)
+        assert run_dir.name.startswith("run_")
+        assert (run_dir / "contigweaver_edges.tsv").exists()
+        assert (run_dir / "index.html").exists()
+        assert (run_dir / "run.log").exists()
+
+    def test_cli_creates_latest_symlink(self, tmp_path, mini_gfa_gz_file, mini_contigs_fasta, mini_viral_fasta):
+        from contigweaver.pipeline import main
+
+        out = tmp_path / "cli_latest_link_out"
+        args = [
+            "--gfa", str(mini_gfa_gz_file),
+            "--contigs", str(mini_contigs_fasta),
+            "--viral-contigs", str(mini_viral_fasta),
+            "--output-dir", str(out),
+        ]
+
+        with patch("sys.argv", ["contigweaver"] + args), patch(
+            "subprocess.run"
+        ) as mock_run, patch(
+            "contigweaver.modules.crispr_miner.SpacerExtractor.extract_to_fasta",
+            return_value=0,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            rc = main()
+
+        assert rc == 0
+        latest = out / "latest"
+        assert latest.is_symlink()
+        run_dir = latest.resolve()
+        assert run_dir.name.startswith("run_")
+        assert "stage1" in run_dir.name
+        assert (run_dir / "run.log").exists()
 
 
 # ===========================================================================
@@ -588,11 +629,12 @@ class TestInputDatasetIntegration:
             rc = main()
 
         assert rc == 0
-        assert (output_dir / "contigweaver_edges.tsv").exists()
-        assert (output_dir / "workdir" / "converted_annotations.tsv").exists()
-        html_report = output_dir / "contigweaver_network.html"
+        run_dir = _resolve_latest_run_dir(output_dir)
+        assert (run_dir / "contigweaver_edges.tsv").exists()
+        assert (run_dir / "workdir" / "converted_annotations.tsv").exists()
+        html_report = run_dir / "contigweaver_network.html"
         assert html_report.exists()
         assert html_report.stat().st_size > 500
-        index_html = output_dir / "index.html"
+        index_html = run_dir / "index.html"
         assert index_html.exists()
         assert "Interactive Network" in index_html.read_text()

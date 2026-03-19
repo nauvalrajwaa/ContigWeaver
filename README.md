@@ -96,7 +96,7 @@ python main.py \
   --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
   --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
   --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
-  --output-dir contigweaver_output/
+  --output-dir runs/
 ```
 
 ### Stage 1 + Stage 2 (full pipeline)
@@ -110,11 +110,36 @@ python main.py \
   --annotations "input/SPAdes_Prokka" \
   --annotation-data "annotation_data.tsv" \
   --binning "binning.tsv" \
-  --output-dir contigweaver_output/ \
+  --output-dir runs/ \
   --verbose
 ```
 
-Open `contigweaver_output/contigweaver_network.html` in any browser to explore the network.
+### Comprehensive command example
+
+```bash
+python main.py \
+  --gfa "input/SPAdes_Asm/SPAdes-sponge_brin.assembly.gfa.gz" \
+  --contigs "input/SPAdes_Asm/SPAdes-sponge_brin.contigs.fa" \
+  --viral-contigs "input/SPAdes_Genomad/Galaxy48-[geNomad on dataset 43_ virus fasta].fasta" \
+  --coverage "tmp_real_annotation_eval/coverage_from_headers.tsv" \
+  --annotations "input/SPAdes_Prokka" \
+  --annotation-data "annotation_data.tsv" \
+  --binning "binning.tsv" \
+  --minced-bin minced \
+  --blastn-bin blastn \
+  --makeblastdb-bin makeblastdb \
+  --spearman-threshold 0.85 \
+  --p-value-threshold 0.01 \
+  --output-dir runs/ \
+  --verbose
+```
+
+Each execution now creates an isolated run folder under `runs/`, for example:
+
+- `runs/run_20260319_082502_stage1_a1b2c3d4/`
+- `runs/run_20260319_083044_stage2_e5f6g7h8/`
+
+Use `runs/latest/` to jump to the newest run, then open `runs/latest/contigweaver_network.html` in any browser to explore the network.
 
 For large real assemblies, ContigWeaver always writes the **full TSV** and then writes a **focused HTML subgraph** around non-physical evidence so browser rendering stays practical.
 
@@ -167,18 +192,24 @@ NODE_9	bin_004
 | File | Description |
 |---|---|
 | `contigweaver_edges.tsv` | Full edge list with Source, Target, Evidence_Type, weight, attributes |
-| `contigweaver_network.html` | **Interactive network** — full graph if small, otherwise a focused sampled subgraph around CRISPR / bridge / ecological evidence |
-| `index.html` | Comprehensive run report with overview, evidence breakdown, edge preview, network embed, and related HTML reports |
+| `contigweaver_network.html` | **Interactive network** — full graph if small; otherwise a focused ego-view around the top actor with evidence-layer controls and auto summary |
+| `index.html` | Comprehensive run report with overview, evidence breakdown, edge preview, network embed, related HTML reports, and automated multi-evidence Key Findings |
+| `run.log` | Per-run log file with start/end time, arguments, module progress, stats, warnings, and errors |
 | `spacers.fasta` | Extracted CRISPR spacers (Stage 1) |
 | `spacer_vs_viral.tsv` | BLAST hits: spacer → viral contig (identity ≥ 95 %, coverage ≥ 90 %) |
 | `minced_output.txt` | Raw MinCED predictions |
 | `workdir/converted_annotations.tsv` | Generated automatically when `--annotations` points to a Prokka directory |
 
+All files above are written inside the run-specific folder (`runs/run_*`) and never in the repository root.
+
 ### Large-graph behavior
 
 - `contigweaver_edges.tsv` always contains the complete graph.
 - `contigweaver_network.html` switches to a focused view when the graph exceeds the HTML budget.
+- Physical hairball suppression is applied in HTML mode: `physical_overlap` edges are retained only when they connect viral and non-viral nodes.
 - Current default HTML budget: `1500` nodes and `4000` edges.
+- Focus center is selected from the highest-degree viral node (fallback: global top-degree node), then expanded using an ego-network (`radius=2`).
+- Default edge-layer toggles in HTML: `crispr_targeting`, `segment_membership`, `co_abundance_guild` ON; `physical_overlap` OFF.
 - Focus priority: non-physical evidence first (`segment_membership`, `crispr_targeting`, `co_abundance_guild`, `functional_operon`, `taxonomic_match`), then local graph neighborhood.
 
 ### Annotation directory support
@@ -260,7 +291,7 @@ options:
   --annotations FILE         Functional annotations TSV or Prokka directory  [Stage 2]
   --annotation-data FILE     Annotation Miner TSV  [Stage 2]
   --binning FILE             Binning assignments TSV with Contig_ID/Bin_ID  [Stage 2]
-  --output-dir DIR           Output directory (default: contigweaver_output)
+  --output-dir DIR           Root output directory for run_* folders (default: runs)
   --minced-bin PATH          Path to minced binary (default: minced)
   --blastn-bin PATH          Path to blastn binary (default: blastn)
   --makeblastdb-bin PATH     Path to makeblastdb binary (default: makeblastdb)
